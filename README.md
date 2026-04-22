@@ -58,6 +58,4 @@ Technology (CPTEn), School of Electrical and Computer Engineering (FEEC),
 University of Campinas (UNICAMP), under the supervision of 
 **Prof. Dr. Marcos J. Rider Flores**.
 
-It is associated with a planned research internship at the 
-**University of Melbourne** under **Prof. Luis Ochoa**, supported by the 
-FAPESP BEPE program.
+
