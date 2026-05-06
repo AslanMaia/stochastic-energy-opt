@@ -12,13 +12,17 @@ P_pv_data = [
     3.9734, 3.7105, 3.1671, 2.7282, 2.3926, 2.1764,
     1.9083, 1.4257, 0.0034, 0.0000, 0.0000, 0.0000
 ]
+# Fator de conversão USD -> BRL (mantido aqui para consistência)
+FX = 4.96
 
 tariff_buy = [
     0.22419, 0.22419, 0.22419, 0.22419, 0.22419, 0.22419,
     0.22419, 0.22419, 0.22419, 0.22419, 0.22419, 0.22419,
     0.22419, 0.22419, 0.22419, 0.22419, 0.22419, 0.32629,
     0.51792, 0.51792, 0.51792, 0.32629, 0.22419, 0.22419
-] # BRL/kWh
+]
+# converte tarifas de USD para BRL
+tariff_buy = [round(x * FX, 6) for x in tariff_buy]
 
 parameters = {
     "Grid": {"Pmax": 90},

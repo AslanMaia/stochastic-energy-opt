@@ -1,27 +1,42 @@
-# model/smart_home.py
+
 from pyomo.opt import SolverFactory, SolverStatus, TerminationCondition
 import pyomo.environ as pyo
 import pandas as pd
 import matplotlib.pyplot as plt
 
 class SmartHomeStochastic:
-    def __init__(self, parameters, scenarios, tariff_buy):
+    def __init__(self, parameters, scenarios, tariff_buy, FX=1.0):
         # Atributos do objeto — precisam de self para sobreviver entre métodos
         self.parameters = parameters
         self.scenarios  = scenarios
         self.tariff_buy = tariff_buy
+        self.FX = FX
         self.results    = {}        # será preenchido em solve()
 
     def build(self):
         m     = pyo.ConcreteModel('SmartHome_Stochastic')
-        delta = 1.0
+        self.delta = delta = 1.0
 
-        self.CAPEX_PV          = CAPEX_PV          = 600.0 * 4.96           # BRL/kW
-        self.OPEX_PV_RATE      = OPEX_PV_RATE      = 0.05 * self.CAPEX_PV   # 5% do CAPEX (taxa anual)
-        self.CAPEX_BESS        = CAPEX_BESS        = 800.0 * 4.96           # BRL/kWh
-        self.OPEX_BESS_PER_KWH = OPEX_BESS_PER_KWH = 0.24 * 4.96            # BRL/kWh (anual, por kWh de capacidade)
+        # Custos de investimento/opex em BRL (converte USD -> BRL via FX)
+        CAPEX_PV = 600.0 * self.FX                # BRL/kW
+        OPEX_PV_RATE = 0.05                        # 5% do CAPEX (taxa anual)
+        CAPEX_BESS = 800.0 * self.FX               # BRL/kWh
+        OPEX_BESS_PER_KWH = 0.24 * self.FX         # BRL/kWh (anual, por kWh de capacidade)
 
+        # Anualização do CAPEX (fator de recuperação de capital)
+        life_years = 20
+        discount_rate = 0.08
+        if discount_rate > 0:
+            crf = discount_rate * (1 + discount_rate) ** life_years / (((1 + discount_rate) ** life_years) - 1)
+        else:
+            crf = 1.0 / life_years
 
+        # guardo os parâmetros para diagnóstico em solve()
+        self.CAPEX_PV = CAPEX_PV
+        self.OPEX_PV_RATE = OPEX_PV_RATE
+        self.CAPEX_BESS = CAPEX_BESS
+        self.OPEX_BESS_PER_KWH = OPEX_BESS_PER_KWH
+        self.crf = crf
         # Conjuntos
         m.T = pyo.RangeSet(0, len(self.tariff_buy) - 1)
         m.S = pyo.Set(initialize=self.scenarios.keys())
@@ -129,7 +144,7 @@ class SmartHomeStochastic:
 
         # Objetivo: custo esperado operacional + custo diário da capacidade (BRL/dia)
         def objective_rule(m):
-            operational = delta * sum(
+            operational = self.delta * sum(
                 m.prob[s] * sum(
                     m.tariff[t] * m.Pgrid_buy[s, t] - 0.7 * m.tariff[t] * m.Pgrid_sell[s, t]
                     for t in m.T
@@ -137,9 +152,9 @@ class SmartHomeStochastic:
                 for s in m.S
             )
 
-            annual_capex_pv = CAPEX_PV * m.PV_cap
+            annual_capex_pv = CAPEX_PV * crf * m.PV_cap
             annual_opex_pv = OPEX_PV_RATE * CAPEX_PV * m.PV_cap
-            annual_capex_bess = CAPEX_BESS * m.BESS_capacity
+            annual_capex_bess = CAPEX_BESS * crf * m.BESS_capacity
             annual_opex_bess = OPEX_BESS_PER_KWH * m.BESS_capacity
 
             daily_capacity_cost = (annual_capex_pv + annual_opex_pv + annual_capex_bess + annual_opex_bess) / 365.0
@@ -157,7 +172,7 @@ class SmartHomeStochastic:
         if (solution.solver.status == SolverStatus.ok and
                 solution.solver.termination_condition == TerminationCondition.optimal):
             # calculo operacional explicitamente
-            operational_val = pyo.value(delta * sum(
+            operational_val = pyo.value(self.delta * sum(
                 m.prob[s] * sum(
                     m.tariff[t] * m.Pgrid_buy[s, t] - 0.7 * m.tariff[t] * m.Pgrid_sell[s, t]
                     for t in m.T
@@ -168,10 +183,10 @@ class SmartHomeStochastic:
             pv_cap = pyo.value(m.PV_cap)
             bess_cap = pyo.value(m.BESS_capacity)
 
-            annual_capex_pv = CAPEX_PV * pv_cap
-            annual_opex_pv = OPEX_PV_RATE * CAPEX_PV * pv_cap
-            annual_capex_bess = CAPEX_BESS * bess_cap
-            annual_opex_bess = OPEX_BESS_PER_KWH * bess_cap
+            annual_capex_pv = self.CAPEX_PV * self.crf * pv_cap
+            annual_opex_pv = self.OPEX_PV_RATE * self.CAPEX_PV * pv_cap
+            annual_capex_bess = self.CAPEX_BESS * self.crf * bess_cap
+            annual_opex_bess = self.OPEX_BESS_PER_KWH * bess_cap
             daily_capacity_cost = (annual_capex_pv + annual_opex_pv + annual_capex_bess + annual_opex_bess) / 365.0
 
             print(f"\n✓ Objetivo total: {pyo.value(m.objective):.4f} BRL/dia")

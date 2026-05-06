@@ -3,14 +3,14 @@ import pyomo.environ as pyo
 import pandas as pd
 import matplotlib.pyplot as plt
 
-def bess_sweep(pv_opt, parameters, scenarios, tariff_buy, FX=1.0):
-    """Varre capacidades de BESS com PV fixo em pv_opt. Recebe `FX` e o repassa ao modelo."""
+def bess_sweep(pv_opt, parameters, scenarios, tariff_buy):
+    """Varre capacidades de BESS com PV fixo em pv_opt repassa ao modelo."""
     bess_list = [0, 1, 2, 4, 8, 12, 16, 20]
     rows = []
     for b in bess_list:
         # Cria nova instância do modelo (importa a classe localmente para evitar circular)
         from model.smart_home import SmartHomeStochastic
-        sh2 = SmartHomeStochastic(parameters, scenarios, tariff_buy, FX)
+        sh2 = SmartHomeStochastic(parameters, scenarios, tariff_buy)
         sh2.build()
         m2 = sh2.model
         m2.PV_cap.fix(pv_opt)
@@ -60,4 +60,64 @@ def bess_sweep(pv_opt, parameters, scenarios, tariff_buy, FX=1.0):
     plt.grid(True)
     plt.legend()
     plt.title('Diagnóstico: varredura BESS (PV fixo) — BRL/dia')
+    plt.show()
+
+
+def plot_results(sh):
+    """Plot dos resultados já gerados em `sh.results`.
+
+    Recebe uma instância `SmartHomeStochastic` (ou objeto com atributos
+    `model`, `results`, `scenarios` e `parameters`) e plota os gráficos por
+    cenário.
+    """
+    import numpy as _np
+
+    m = sh.model
+    horas = list(m.T)
+    cenarios = list(sh.results.keys())
+    n = len(cenarios)
+
+    fig, axes = plt.subplots(nrows=n, ncols=2, figsize=(14, 4 * n), sharey=False)
+    fig.suptitle("Resultados (BRL)", fontsize=14, fontweight='bold')
+
+    for i, s in enumerate(cenarios):
+        df = sh.results[s]
+        if n == 1:
+            ax1, ax2 = axes
+        else:
+            ax1 = axes[i, 0]
+            ax2 = axes[i, 1]
+
+        prob = sh.scenarios[s]['prob']
+
+        ax1.plot(horas, df['Demanda'],       label='Demanda',      color='black',  linewidth=2)
+        ax1.plot(horas, df['PV'],            label='PV',           color='orange', linewidth=1.5)
+        ax1.plot(horas, df['Rede_compra'],   label='Rede compra',  color='steelblue', linewidth=1.5)
+        ax1.plot(horas, df['Rede_venda'],    label='Rede venda',   color='green',  linewidth=1.5, linestyle='--')
+        ax1.plot(horas, df['BESS_descarga'], label='BESS descarga',color='red',    linewidth=1.5, linestyle='-.')
+        ax1.plot(horas, df['BESS_carga'],    label='BESS carga',   color='purple', linewidth=1.5, linestyle=':')
+
+        ax1.set_title(f"Cenário: {s}  (π = {prob})")
+        ax1.set_ylabel("Potência [kW]")
+        ax1.set_xlabel("Hora")
+        ax1.legend(fontsize=8)
+        ax1.grid(True, alpha=0.3)
+
+        ax2.fill_between(horas, df['E_BESS'], alpha=0.4, color='purple', label='E_BESS')
+        ax2.plot(horas, df['E_BESS'], color='purple', linewidth=1.5)
+
+        try:
+            cap_max = pyo.value(sh.model.BESS_capacity)
+        except Exception:
+            cap_max = sh.parameters['BESS']['capacity']
+        ax2.axhline(cap_max, color='red', linestyle='--', linewidth=1, label=f'Cap. máx. ({cap_max} kWh)')
+
+        ax2.set_title(f"Bateria — {s}")
+        ax2.set_ylabel("Energia [kWh]")
+        ax2.set_xlabel("Hora")
+        ax2.set_ylim(0, cap_max * 1.15)
+        ax2.legend(fontsize=8)
+        ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
     plt.show()
