@@ -5,38 +5,35 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 class SmartHomeStochastic:
-    def __init__(self, parameters, scenarios, tariff_buy, FX=1.0):
+    def __init__(self, parameters, scenarios, tariff_buy):
         # Atributos do objeto — precisam de self para sobreviver entre métodos
         self.parameters = parameters
         self.scenarios  = scenarios
         self.tariff_buy = tariff_buy
-        self.FX = FX
         self.results    = {}        # será preenchido em solve()
 
     def build(self):
         m     = pyo.ConcreteModel('SmartHome_Stochastic')
         self.delta = delta = 1.0
 
-        # Custos de investimento/opex em BRL (converte USD -> BRL via FX)
-        CAPEX_PV = 600.0 * self.FX                # BRL/kW
-        OPEX_PV_RATE = 0.05                        # 5% do CAPEX (taxa anual)
-        CAPEX_BESS = 800.0 * self.FX               # BRL/kWh
-        OPEX_BESS_PER_KWH = 0.24 * self.FX         # BRL/kWh (anual, por kWh de capacidade)
+        # Custos de investimento/opex em BRL (USD valores multiplicados por 4.96)
+        CAPEX_PV = 600.0 * 4.96                # BRL/kW
+        OPEX_PV_RATE = 0.05                    # 5% do CAPEX (taxa anual)
+        CAPEX_BESS = 800.0 * 4.96              # BRL/kWh
+        OPEX_BESS_PER_KWH = 0.24 * 4.96        # BRL/kWh (anual, por kWh de capacidade)
 
-        # Anualização do CAPEX (fator de recuperação de capital)
+        # Horizonte: tratamos custos por dia (projeto de 1..3 dias).
+        # Usamos depreciação linear diária para distribuir CAPEX no horizonte.
         life_years = 20
-        discount_rate = 0.08
-        if discount_rate > 0:
-            crf = discount_rate * (1 + discount_rate) ** life_years / (((1 + discount_rate) ** life_years) - 1)
-        else:
-            crf = 1.0 / life_years
+        life_days = life_years * 365
+        self.life_years = life_years
+        self.life_days = life_days
 
         # guardo os parâmetros para diagnóstico em solve()
         self.CAPEX_PV = CAPEX_PV
         self.OPEX_PV_RATE = OPEX_PV_RATE
         self.CAPEX_BESS = CAPEX_BESS
         self.OPEX_BESS_PER_KWH = OPEX_BESS_PER_KWH
-        self.crf = crf
         # Conjuntos
         m.T = pyo.RangeSet(0, len(self.tariff_buy) - 1)
         m.S = pyo.Set(initialize=self.scenarios.keys())
@@ -152,12 +149,16 @@ class SmartHomeStochastic:
                 for s in m.S
             )
 
-            annual_capex_pv = CAPEX_PV * crf * m.PV_cap
-            annual_opex_pv = OPEX_PV_RATE * CAPEX_PV * m.PV_cap
-            annual_capex_bess = CAPEX_BESS * crf * m.BESS_capacity
-            annual_opex_bess = OPEX_BESS_PER_KWH * m.BESS_capacity
+            # custo diário de capacidade (depreciação linear + opex diário)
+            capex_pv_daily = CAPEX_PV / life_days
+            opex_pv_daily = OPEX_PV_RATE * CAPEX_PV / 365.0
+            capex_bess_daily = CAPEX_BESS / life_days
+            opex_bess_daily = OPEX_BESS_PER_KWH / 365.0
 
-            daily_capacity_cost = (annual_capex_pv + annual_opex_pv + annual_capex_bess + annual_opex_bess) / 365.0
+            daily_capacity_cost = (
+                capex_pv_daily * m.PV_cap + opex_pv_daily * m.PV_cap
+                + capex_bess_daily * m.BESS_capacity + opex_bess_daily * m.BESS_capacity
+            )
 
             return operational + daily_capacity_cost
         m.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
@@ -183,16 +184,20 @@ class SmartHomeStochastic:
             pv_cap = pyo.value(m.PV_cap)
             bess_cap = pyo.value(m.BESS_capacity)
 
-            annual_capex_pv = self.CAPEX_PV * self.crf * pv_cap
-            annual_opex_pv = self.OPEX_PV_RATE * self.CAPEX_PV * pv_cap
-            annual_capex_bess = self.CAPEX_BESS * self.crf * bess_cap
-            annual_opex_bess = self.OPEX_BESS_PER_KWH * bess_cap
-            daily_capacity_cost = (annual_capex_pv + annual_opex_pv + annual_capex_bess + annual_opex_bess) / 365.0
+            # dailyized CAPEX/OPEX (depreciação linear diária + opex diário)
+            capex_pv_daily = self.CAPEX_PV / self.life_days
+            opex_pv_daily = self.OPEX_PV_RATE * self.CAPEX_PV / 365.0
+            capex_bess_daily = self.CAPEX_BESS / self.life_days
+            opex_bess_daily = self.OPEX_BESS_PER_KWH / 365.0
+
+            pv_daily_cost = (capex_pv_daily + opex_pv_daily) * pv_cap
+            bess_daily_cost = (capex_bess_daily + opex_bess_daily) * bess_cap
+            daily_capacity_cost = pv_daily_cost + bess_daily_cost
 
             print(f"\n✓ Objetivo total: {pyo.value(m.objective):.4f} BRL/dia")
             print(f"  Operacional (custo esperado diário): {operational_val:.4f} BRL/dia")
-            print(f"  PV_cap (kW): {pv_cap:.4f} -> custo diário PV: {(annual_capex_pv+annual_opex_pv)/365.0:.4f} BRL/dia")
-            print(f"  BESS_cap (kWh): {bess_cap:.4f} -> custo diário BESS: {(annual_capex_bess+annual_opex_bess)/365.0:.4f} BRL/dia")
+            print(f"  PV_cap (kW): {pv_cap:.4f} -> custo diário PV: {pv_daily_cost:.4f} BRL/dia")
+            print(f"  BESS_cap (kWh): {bess_cap:.4f} -> custo diário BESS: {bess_daily_cost:.4f} BRL/dia")
             print(f"  Daily capacity cost (PV+BESS): {daily_capacity_cost:.4f} BRL/dia")
         else:
             print("✗ Solver não encontrou solução ótima.")
@@ -206,11 +211,11 @@ class SmartHomeStochastic:
             for t in m.T:
                 rows.append({
                     'Hora':            t,
-                    'Rede_compra':     pyo.value(m.Pgrid_buy[s, t]),
+                    'Rede_compra':     pyo.value(m.Pgrid_buy[s, t]), 
                     'Rede_venda':      pyo.value(m.Pgrid_sell[s, t]),
                     'PV':              pyo.value(m.PV_profile[s, t]) * pyo.value(m.PV_cap),
                     'Demanda':         pyo.value(m.P_demand[s, t]),
-                    'BESS_carga':      pyo.value(m.Pbess_charge[t]),
+                    'BESS_carga':      pyo.value(m.Pbess_charge[t]), 
                     'BESS_descarga':   pyo.value(m.Pbess_discharge[t]),
                     'E_BESS':          pyo.value(m.E_bess[t]),
                     'state':           int(pyo.value(m.state[t])),
