@@ -24,14 +24,7 @@ tariff_buy = [
     0.22419, 0.22419, 0.22419, 0.22419, 0.22419, 0.32629,
     0.51792, 0.51792, 0.51792, 0.32629, 0.22419, 0.22419
 ]
-parameters = {
-    "Grid": {"Pmax": 90},
-    "BESS": {
-        "eff": 0.90,
-        "self_discharge": 0.01,
-        "initial capacity": 0,
-    }
-}
+
 scenarios = {
     "base": {
         "P_demand": P_demand_data,
@@ -52,8 +45,7 @@ scenarios = {
 
 
 class SmartHomeStochastic:
-    def __init__(self, parameters, scenarios, tariff_buy):
-        self.parameters = parameters
+    def __init__(self, scenarios, tariff_buy):
         self.scenarios  = scenarios
         self.tariff_buy = tariff_buy
         self.results    = {}        # será preenchido em solve()
@@ -76,17 +68,19 @@ class SmartHomeStochastic:
         m.tariff   = pyo.Param(m.T,
                                initialize=lambda m, t: self.tariff_buy[t])
 
-        # Componentes
-        eff       = self.parameters['BESS']['eff']
-        beta      = self.parameters['BESS']['self_discharge']
-        init_cap  = self.parameters['BESS']['initial capacity']
-        Pmax_grid = self.parameters['Grid']['Pmax']
+        # Propriedades
+        eff       = 0.9
+        beta      = 0.01 # self-discharge rate
+        init_cap  = 0
+        Pmax_grid = 90
         
         ### VARIÁVEIS ─────────────────────────────────────────────────────────────────────
 
         # Variáveis de decisão (1ª etapa), note que as variaveis de decisão estão em MAIÚSCULO
         m.BESS_capacity = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 200))
         m.BESS_Pmax     = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 1e6))
+        m.PV_capacity   = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 200))
+        m.PV_Pmax       = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 1e6))        
 
         # Binárias para operação (1ª etapa, mesma para todos os cenários)
         m.state = pyo.Var(m.T, within=pyo.Binary)
@@ -161,8 +155,8 @@ class SmartHomeStochastic:
             return m.E_bess[t] == E_prev + charge - discharge - loss
         m.bess_energy = pyo.Constraint(m.T, rule=bess_energy_rule)
 
-        # Objetivo -------------------------------------------------------------
-        
+        # Objetivo ──────────────────────────────────────────────────────────────────────
+                
         self.CAPEX_BESS        = 56 * 4.96                    # BRL/kWh
         #self.CAPEX_BESS_DAILY  = self.CAPEX_BESS / (10 * 365.0)   # BRL/kWh/dia
         
@@ -248,7 +242,7 @@ class SmartHomeStochastic:
             try:
                 cap_max = pyo.value(self.model.BESS_capacity)
             except Exception:
-                cap_max = self.parameters['BESS']['capacity']
+                cap_max = Pmax_grid
             ax2.axhline(cap_max, color='red', linestyle='--', linewidth=1, label=f'Cap. máx. ({cap_max} kWh)')
 
             ax2.set_title(f"Bateria — {s}")
@@ -263,7 +257,7 @@ class SmartHomeStochastic:
 
 
 # ── Execução ───────────────────────────────────────────────────────────────────
-sh = SmartHomeStochastic(parameters, scenarios, tariff_buy)
+sh = SmartHomeStochastic(scenarios, tariff_buy)
 sh.build()
 sh.solve()
 sh.plot()
