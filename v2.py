@@ -84,7 +84,7 @@ class SmartHomeStochastic:
         
         ### VARIÁVEIS ─────────────────────────────────────────────────────────────────────
 
-        # Variáveis decisão de capacidade (1ª etapa) note que as variaveis de decisão estão em MAIÚSCULO
+        # Variáveis de decisão (1ª etapa), note que as variaveis de decisão estão em MAIÚSCULO
         m.BESS_capacity = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 200))
         m.BESS_Pmax     = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 1e6))
 
