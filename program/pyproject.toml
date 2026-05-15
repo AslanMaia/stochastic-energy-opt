@@ -1,4 +1,0 @@
-[tool.pyright]
-reportOperatorIssue = false
-reportAttributeAccessIssue = false
-reportOptionalMemberAccess = false
