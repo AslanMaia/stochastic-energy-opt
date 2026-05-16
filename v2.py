@@ -11,6 +11,7 @@ P_demand_data = [
     2.2038, 2.2997, 2.1659, 2.5046, 2.7490, 4.0597,
     4.9924, 5.4257, 5.0491, 4.4294, 3.7692, 2.7716
 ]
+
 P_pv_data = [
     0.0000, 0.0000, 0.0000, 0.0000, 0.0796, 0.4565,
     1.0742, 1.5790, 2.4343, 2.7488, 3.5092, 3.8988,
@@ -26,21 +27,21 @@ tariff_buy = [
 ]
 
 scenarios = {
-    "base": {
-        "P_demand": P_demand_data,
-        "P_pv":     P_pv_data,
-        "prob":     0.60,
+    "alta_geracao": {
+        "P_demand" : [x * 0.5 for x in P_demand_data],
+        "P_pv_used": [(v * 1.5 / max(P_pv_data)) for v in P_pv_data],
+        "prob"     : 0.20,
+    },
+        "base": {
+        "P_demand" : P_demand_data,
+        "P_pv_used": [(v / max(P_pv_data)) for v in P_pv_data],
+        "prob"     : 0.60,
     },
     "alta_demanda": {
-        "P_demand": [round(x * 1.5, 4) for x in P_demand_data],
-        "P_pv":     [round(x * 0.5, 4) for x in P_pv_data],
-        "prob":     0.20,
-    },
-    "alta_geracao": {
-        "P_demand": [round(x * 0.5, 4) for x in P_demand_data],
-        "P_pv":     [round(x * 1.5, 4) for x in P_pv_data],
-        "prob":     0.20,
-    },
+        "P_demand" : [x * 1.5 for x in P_demand_data],
+        "P_pv_used": [(v * 0.5 / max(P_pv_data)) for v in P_pv_data],
+        "prob"     : 0.20,
+    }
 }
 
 
@@ -62,7 +63,7 @@ class SmartHomeStochastic:
         m.P_demand = pyo.Param(m.S, m.T,
                                initialize=lambda m, s, t: self.scenarios[s]['P_demand'][t])
         m.P_pv     = pyo.Param(m.S, m.T,
-                               initialize=lambda m, s, t: self.scenarios[s]['P_pv'][t])
+                               initialize=lambda m, s, t: self.scenarios[s]['P_pv_used'][t])
         m.prob     = pyo.Param(m.S,
                                initialize=lambda m, s: self.scenarios[s]['prob'])
         m.tariff   = pyo.Param(m.T,
@@ -79,8 +80,7 @@ class SmartHomeStochastic:
         # Variáveis de decisão (1ª etapa), note que as variaveis de decisão estão em MAIÚSCULO
         m.BESS_capacity = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 200))
         m.BESS_Pmax     = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 1e6))
-        m.PV_capacity   = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 200))
-        m.PV_Pmax       = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 1e6))        
+        m.PV_Pmax       = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 1e6)) # kWp    
 
         # Binárias para operação (1ª etapa, mesma para todos os cenários)
         m.state = pyo.Var(m.T, within=pyo.Binary)
@@ -113,8 +113,9 @@ class SmartHomeStochastic:
             return m.BESS_Pmax <= m.BESS_capacity * 0.5  # força BESS_Pmax a ser menor usando C-rate
         m.befficiency_limit = pyo.Constraint(m.T, rule=befficiency_limit_rule)
 
+
         # 2. Evita carga e descarga simultâneas
-        M = 20 * 0.5 # BESS_capacity_max × C_rate
+        M = 200 * 0.5 # BESS_capacity_max × C_rate
         def power_used_limit_rule(m, t):
             return m.Pbess_charge[t] + m.Pbess_discharge[t] <= m.BESS_Pmax 
         m.power_used_limit = pyo.Constraint(m.T, rule=power_used_limit_rule)
@@ -131,7 +132,7 @@ class SmartHomeStochastic:
         # 3. Balanços
         def power_balance_rule(m, s, t):
             return (+ m.Pgrid_buy[s, t]
-                    + m.P_pv[s, t]
+                    + m.P_pv[s, t] * m.PV_Pmax
                     + m.Pbess_discharge[t]
                     ==
                     + m.Pgrid_sell[s, t]
@@ -157,8 +158,8 @@ class SmartHomeStochastic:
 
         # Objetivo ──────────────────────────────────────────────────────────────────────
                 
-        self.CAPEX_BESS        = 56 * 4.96                    # BRL/kWh
-        #self.CAPEX_BESS_DAILY  = self.CAPEX_BESS / (10 * 365.0)   # BRL/kWh/dia
+        self.CAPEX_BESS   = 56 * 4.96     # BRL/kWh
+        CAPEX_PV     = 1200 * 4.96   # BRL/kWh/dia
         
         self.OPEX         = 365 * self.delta * sum(m.prob[s] * sum(m.tariff[t] * m.Pgrid_buy[s, t] - 0.7 * m.tariff[t] * m.Pgrid_sell[s, t]for t in m.T)for s in m.S)
         
@@ -167,7 +168,7 @@ class SmartHomeStochastic:
         
         def objective_rule(m):
             NPV = sum((self.OPEX ) / ((1 + self.r) ** year) for year in range(10))
-            return (m.BESS_capacity * self.CAPEX_BESS + NPV) # anual
+            return (m.BESS_capacity * self.CAPEX_BESS + NPV + m.PV_Pmax  * CAPEX_PV) # anual
             
         self.objective = m.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
 
@@ -195,7 +196,7 @@ class SmartHomeStochastic:
                     'Hora':            t,
                     'Rede_compra':     pyo.value(m.Pgrid_buy[s, t]),
                     'Rede_venda':      pyo.value(m.Pgrid_sell[s, t]),
-                    'PV':              pyo.value(m.P_pv[s, t]),
+                    'PV':              pyo.value(m.P_pv[s, t]) * pyo.value(m.PV_Pmax),
                     'Demanda':         pyo.value(m.P_demand[s, t]),
                     'BESS_carga':      pyo.value(m.Pbess_charge[t]),
                     'BESS_descarga':   pyo.value(m.Pbess_discharge[t]),
@@ -209,53 +210,107 @@ class SmartHomeStochastic:
             self.results[s] = df
 
     def plot(self):
-        horas     = list(self.model.T)
-        cenarios  = list(self.results.keys())
-        n         = len(cenarios)
+        horas    = list(self.model.T)
+        cenarios = list(self.results.keys())
+        n        = len(cenarios)
 
-        fig, axes = plt.subplots(nrows=n, ncols=2, figsize=(14, 4 * n), sharey=False)
-        fig.suptitle("Resultados (BRL)", fontsize=14, fontweight='bold')
+        pv_opt   = pyo.value(self.model.PV_Pmax)
+        bess_opt = pyo.value(self.model.BESS_capacity)
+        obj_opt  = pyo.value(self.model.objective)
+
+        # ── Figura 1: Painel de resultados ótimos ────────────────────────────────
+        fig_res, ax_res = plt.subplots(figsize=(7, 3))
+        ax_res.axis('off')
+
+        dados = [
+            ["PV instalado",        f"{pv_opt:.1f} kWp"],
+            ["BESS instalado",      f"{bess_opt:.1f} kWh"],
+            ["Custo total (VPL)",   f"R$ {obj_opt:,.0f}"],
+            ["Horizonte",           "10 anos  |  r = 5%"],
+            ["Cenários",            "base (60%)  |  alta geração (20%)  |  alta demanda (20%)"],
+        ]
+
+        tabela = ax_res.table(
+            cellText=dados,
+            colLabels=["Parâmetro", "Valor ótimo"],
+            cellLoc='left',
+            loc='center',
+            colWidths=[0.42, 0.58],
+        )
+        tabela.auto_set_font_size(False)
+        tabela.set_fontsize(11)
+        tabela.scale(1, 2.2)
+
+        # Estilo do cabeçalho
+        for col in range(2):
+            tabela[0, col].set_facecolor('#1e3a5f')
+            tabela[0, col].set_text_props(color='white', fontweight='bold')
+
+        # Linha de destaque — custo total
+        for col in range(2):
+            tabela[3, col].set_facecolor('#fef9c3')
+            tabela[3, col].set_text_props(fontweight='bold')
+
+        fig_res.suptitle("Dimensionamento Ótimo", fontsize=13,
+                        fontweight='bold', y=0.98)
+        plt.tight_layout()
+        
+
+        # ── Figura 2: Gráficos operacionais ─────────────────────────────────────
+        fig, axes = plt.subplots(nrows=n, ncols=2, figsize=(15, 4.5 * n))
+
+        STYLE = {
+            'demand': dict(color='#9ca3af', linewidth=1.6, linestyle='--', alpha=0.9,   label='Demanda'),
+            'pv':     dict(color='#f59e0b', linewidth=2.5, linestyle=':',               label='PV gerado'),
+            'buy':    dict(color='#3b82f6', linewidth=2.5, linestyle='-',               label='Rede compra'),
+            'sell':   dict(color="#00d68b", linewidth=2.5, linestyle='-',               label='Rede venda'),
+            'dis':    dict(color="#c15531", linewidth=2.0,                              label='BESS descarga'),
+            'ch':     dict(color="#3d1c0c", linewidth=2.0,                              label='BESS carga'),
+        }
 
         for i, s in enumerate(cenarios):
-            df  = self.results[s]
-            ax1 = axes[i, 0]
-            ax2 = axes[i, 1]
-
+            df   = self.results[s]
+            ax1  = axes[i, 0]
+            ax2  = axes[i, 1]
             prob = self.scenarios[s]['prob']
 
-            ax1.plot(horas, df['Demanda'],       label='Demanda',      color='black',  linewidth=2)
-            ax1.plot(horas, df['PV'],            label='PV',           color='orange', linewidth=1.5)
-            ax1.plot(horas, df['Rede_compra'],   label='Rede compra',  color='steelblue', linewidth=1.5)
-            ax1.plot(horas, df['Rede_venda'],    label='Rede venda',   color='green',  linewidth=1.5, linestyle='--')
-            ax1.plot(horas, df['BESS_descarga'], label='BESS descarga',color='red',    linewidth=1.5, linestyle='-.')
-            ax1.plot(horas, df['BESS_carga'],    label='BESS carga',   color='purple', linewidth=1.5, linestyle=':')
+            ax1.plot(horas, df['Demanda'],       **STYLE['demand'])
+            ax1.plot(horas, df['PV'],            **STYLE['pv'])
+            ax1.plot(horas, df['Rede_compra'],   **STYLE['buy'])
+            ax1.plot(horas, df['Rede_venda'],    **STYLE['sell'])
+            ax1.plot(horas, df['BESS_descarga'], **STYLE['dis'])
+            ax1.plot(horas, df['BESS_carga'],    **STYLE['ch'])
 
-            ax1.set_title(f"Cenário: {s}  (π = {prob})")
+            ax1t = ax1.twinx()
+            ax1t.fill_between(horas, self.tariff_buy, step='mid', alpha=0.07, color='gray')
+            ax1t.set_ylabel('Tarifa [BRL/kWh]', fontsize=8, color='#9ca3af')
+            ax1t.tick_params(axis='y', labelsize=7, colors='#9ca3af')
+            ax1t.set_ylim(0, max(self.tariff_buy) * 5)
+            ax1.set_zorder(ax1t.get_zorder() + 1)
+            ax1.patch.set_visible(False)
+
+            ax1.set_title(f"Cenário: {s}  (π = {prob})", fontsize=11, fontweight='semibold')
             ax1.set_ylabel("Potência [kW]")
             ax1.set_xlabel("Hora")
-            ax1.legend(fontsize=8)
-            ax1.grid(True, alpha=0.3)
+            ax1.set_xlim(0, 23)
+            ax1.legend(fontsize=8, loc='upper left', framealpha=0.95)
+            ax1.grid(True, alpha=0.15)
 
-            ax2.fill_between(horas, df['E_BESS'], alpha=0.4, color='purple', label='E_BESS')
-            ax2.plot(horas, df['E_BESS'], color='purple', linewidth=1.5)
+            ax2.fill_between(horas, df['E_BESS'], alpha=0.3, color='#8b5cf6')
+            ax2.plot(horas, df['E_BESS'], color='#7c3aed', linewidth=2.5, label='E_BESS')
+            ax2.axhline(bess_opt, color='#dc2626', linestyle='--', linewidth=1.5,
+                        label=f'Capacidade ótima ({bess_opt:.1f} kWh)')
 
-            try:
-                cap_max = pyo.value(self.model.BESS_capacity)
-            except Exception:
-                cap_max = Pmax_grid
-            ax2.axhline(cap_max, color='red', linestyle='--', linewidth=1, label=f'Cap. máx. ({cap_max} kWh)')
-
-            ax2.set_title(f"Bateria — {s}")
+            ax2.set_title(f"Estado da Bateria — {s}", fontsize=11, fontweight='semibold')
             ax2.set_ylabel("Energia [kWh]")
             ax2.set_xlabel("Hora")
-            ax2.set_ylim(0, cap_max * 1.15)
-            ax2.legend(fontsize=8)
-            ax2.grid(True, alpha=0.3)
+            ax2.set_xlim(0, 23)
+            ax2.set_ylim(0, max(bess_opt * 1.15, 0.1))
+            ax2.legend(fontsize=8, framealpha=0.95)
+            ax2.grid(True, alpha=0.15)
 
         plt.tight_layout()
         plt.show()
-
-
 # ── Execução ───────────────────────────────────────────────────────────────────
 sh = SmartHomeStochastic(scenarios, tariff_buy)
 sh.build()
