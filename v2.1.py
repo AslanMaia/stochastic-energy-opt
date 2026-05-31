@@ -2,7 +2,6 @@ from pyomo.opt import SolverFactory, SolverStatus, TerminationCondition
 import pyomo.environ as pyo
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 
 # ── Dados ──────────────────────────────────────────────────────────────────────
 P_demand_data = [
@@ -44,11 +43,24 @@ scenarios = {
     }
 }
 
+blackout = {
+    "probabilidade_total" : 0.05,
+    "horarios" : [0,3,6,9,12,15,18,21],
+    "duracao" : 3, # horas
+}
+
+blackout['prob_por_horario'] = {
+    h: blackout['probabilidade_total'] / len(blackout['horarios']) # evento independente, distribuição uniforme de probabilidade
+    for h in blackout['horarios']
+    }
+
+# blackout['prob_por_horario'] = {0: 0.00625, 3: 0.00625, 6: 0.00625, 9: 0.00625, 12: 0.00625, 15: 0.00625, 18: 0.00625, 21: 0.00625}
 
 class SmartHomeStochastic:
-    def __init__(self, scenarios, tariff_buy):
+    def __init__(self, scenarios, tariff_buy, blackout):
         self.scenarios  = scenarios
         self.tariff_buy = tariff_buy
+        self.blackout   = blackout
         self.results    = {}        # será preenchido em solve()
 
     def build(self):
@@ -58,116 +70,140 @@ class SmartHomeStochastic:
         # Conjuntos
         m.T = pyo.RangeSet(0, len(self.tariff_buy) - 1)
         m.S = pyo.Set(initialize=self.scenarios.keys())
+        m.B = pyo.Set(initialize=self.blackout['prob_por_horario'].keys())
 
         # Matrizes
         m.P_demand = pyo.Param(m.S, m.T,
                                initialize=lambda m, s, t: self.scenarios[s]['P_demand'][t])
         m.P_pv     = pyo.Param(m.S, m.T,
                                initialize=lambda m, s, t: self.scenarios[s]['P_pv_used'][t])
+        # Vetores rotulados
         m.prob     = pyo.Param(m.S,
                                initialize=lambda m, s: self.scenarios[s]['prob'])
         m.tariff   = pyo.Param(m.T,
                                initialize=lambda m, t: self.tariff_buy[t])
+        m.blackout_prob = pyo.Param(m.B,
+                                    initialize=lambda m, b: self.blackout['prob_por_horario'][b])
 
-        # Propriedades
+        # PARÂMETROS ─────────────────────────────────────────────────────────────────────
         eff       = 0.9
         beta      = 0.01 # self-discharge rate
-        init_cap  = 0
-        Pmax_grid = 90
+        Pmax_grid = 20 # kW, limite de compra/venda da rede
         
         ### VARIÁVEIS ─────────────────────────────────────────────────────────────────────
 
-        # Variáveis de decisão (1ª etapa), note que as variaveis de decisão estão em MAIÚSCULO
+        # Variáveis de decisão (1ª etapa)
+        m.E_bess_init   = pyo.Var(within=pyo.NonNegativeReals)
         m.BESS_capacity = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 200))
         m.BESS_Pmax     = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 1e6))
         m.PV_Pmax       = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 1e6)) # kWp    
 
-        # Binárias para operação (1ª etapa, mesma para todos os cenários)
-        m.state = pyo.Var(m.T, within=pyo.Binary)
-
         # Variáveis operacionais (2ª etapa)
-        m.Pgrid_buy       = pyo.Var(m.S, m.T, within=pyo.NonNegativeReals, bounds=(0, Pmax_grid))
-        m.Pgrid_sell      = pyo.Var(m.S, m.T, within=pyo.NonNegativeReals, bounds=(0, Pmax_grid))
-        m.Pgrid           = pyo.Var(m.S, m.T, within=pyo.Reals,            bounds=(-Pmax_grid, Pmax_grid))
+        m.Pgrid_buy       = pyo.Var(m.S, m.T, m.B, within=pyo.NonNegativeReals, bounds=(0, Pmax_grid))
+        m.Pgrid_sell      = pyo.Var(m.S, m.T, m.B, within=pyo.NonNegativeReals, bounds=(0, Pmax_grid))
+        m.Pgrid           = pyo.Var(m.S, m.T, m.B, within=pyo.Reals,            bounds=(-5, Pmax_grid))
 
-        m.Pbess_charge    = pyo.Var(m.T, within=pyo.NonNegativeReals, bounds=(0, 1e6))
-        m.Pbess_discharge = pyo.Var(m.T, within=pyo.NonNegativeReals, bounds=(0, 1e6))
-        m.E_bess          = pyo.Var(m.T, within=pyo.NonNegativeReals, bounds=(0, 200))
+        m.Pbess_charge    = pyo.Var(m.S, m.T, m.B, within=pyo.NonNegativeReals, bounds=(0, 1e6))
+        m.Pbess_discharge = pyo.Var(m.S, m.T, m.B, within=pyo.NonNegativeReals, bounds=(0, 1e6))
+        m.E_bess          = pyo.Var(m.S, m.T, m.B, within=pyo.NonNegativeReals, bounds=(0, 200))
+        m.state           = pyo.Var(m.S, m.T, m.B, within=pyo.Binary)
 
         ### RESTRIÇÕES ──────────────────────────────────────────────────────────────────────
 
         # 1. Limites físicos e operacionais
-        def energy_capacity_limit(m, t):
-            return m.E_bess[t] <= m.BESS_capacity
-        m.energy_cap = pyo.Constraint(m.T, rule=energy_capacity_limit)
+        def energy_capacity_limit(m, s, t, b):
+            return m.E_bess[s, t, b] <= m.BESS_capacity
+        m.energy_cap = pyo.Constraint(m.S, m.T, m.B, rule=energy_capacity_limit)
 
-        def charge_limit_rule(m,t):
-            return m.Pbess_charge[t] <= m.BESS_Pmax
-        m.charge_limit = pyo.Constraint(m.T, rule=charge_limit_rule)
+        def charge_limit_rule(m, s, t, b):
+            return m.Pbess_charge[s, t, b] <= m.BESS_Pmax
+        m.charge_limit = pyo.Constraint(m.S, m.T, m.B, rule=charge_limit_rule)
 
-        def discharge_limit_rule(m,t):
-            return m.Pbess_discharge[t] <= m.BESS_Pmax
-        m.discharge_limit = pyo.Constraint(m.T, rule=discharge_limit_rule)
+        def discharge_limit_rule(m, s, t, b):
+            return m.Pbess_discharge[s, t, b] <= m.BESS_Pmax
+        m.discharge_limit = pyo.Constraint(m.S, m.T, m.B, rule=discharge_limit_rule)
 
         def befficiency_limit_rule(m, t):
             return m.BESS_Pmax <= m.BESS_capacity * 0.5  # força BESS_Pmax a ser menor usando C-rate
         m.befficiency_limit = pyo.Constraint(m.T, rule=befficiency_limit_rule)
-
+        # Investigar -> m.befficiency_limit = pyo.Constraint(expr=m.BESS_Pmax <= m.BESS_capacity * 0.5)
+        
+        def init_capacity_limit(m):
+            return m.E_bess_init <= m.BESS_capacity
+        m.E_bess_init_cap = pyo.Constraint(rule=init_capacity_limit)
 
         # 2. Evita carga e descarga simultâneas
         M = 200 * 0.5 # BESS_capacity_max × C_rate
-        def power_used_limit_rule(m, t):
-            return m.Pbess_charge[t] + m.Pbess_discharge[t] <= m.BESS_Pmax 
-        m.power_used_limit = pyo.Constraint(m.T, rule=power_used_limit_rule)
+        def power_used_limit_rule(m, s, t, b):
+            return m.Pbess_charge[s, t, b] + m.Pbess_discharge[s, t, b] <= m.BESS_Pmax 
+        m.power_used_limit = pyo.Constraint(m.S, m.T, m.B, rule=power_used_limit_rule)
 
-        def no_simultaneous_charge(m, t):
-            return m.Pbess_charge[t] <= m.state[t] * M
-        m.no_simul_charge = pyo.Constraint(m.T, rule=no_simultaneous_charge)
+        def no_simultaneous_charge(m, s, t, b):
+            return m.Pbess_charge[s, t, b] <= m.state[s, t, b] * M
+        m.no_simul_charge = pyo.Constraint(m.S, m.T, m.B, rule=no_simultaneous_charge)
 
-        def no_simultaneous_discharge(m, t):
-            return m.Pbess_discharge[t] <= (1 - m.state[t]) * M
-        m.no_simul_discharge = pyo.Constraint(m.T, rule=no_simultaneous_discharge)
+        def no_simultaneous_discharge(m, s, t, b):
+            return m.Pbess_discharge[s, t, b] <= (1 - m.state[s, t, b]) * M
+        m.no_simul_discharge = pyo.Constraint(m.S, m.T, m.B, rule=no_simultaneous_discharge)
 
 
         # 3. Balanços
-        def power_balance_rule(m, s, t):
-            return (+ m.Pgrid_buy[s, t]
+        def power_balance_rule(m, s, t, b):
+            return (+ m.Pgrid_buy[s, t, b]
                     + m.P_pv[s, t] * m.PV_Pmax
-                    + m.Pbess_discharge[t]
+                    + m.Pbess_discharge[s, t, b]
                     ==
-                    + m.Pgrid_sell[s, t]
+                    + m.Pgrid_sell[s, t, b]
                     + m.P_demand[s, t]
-                    + m.Pbess_charge[t])
-        m.power_balance = pyo.Constraint(m.S, m.T, rule=power_balance_rule)
+                    + m.Pbess_charge[s, t, b])
+        m.power_balance = pyo.Constraint(m.S, m.T, m.B, rule=power_balance_rule)
 
-        def grid_balance_rule(m, s, t):
-            return m.Pgrid[s, t] == m.Pgrid_buy[s, t] - m.Pgrid_sell[s, t]
-        m.grid_balance = pyo.Constraint(m.S, m.T, rule=grid_balance_rule)
+        def grid_balance_rule(m, s, t, b):
+            return m.Pgrid[s, t, b] == m.Pgrid_buy[s, t, b] - m.Pgrid_sell[s, t, b]
+        m.grid_balance = pyo.Constraint(m.S, m.T, m.B, rule=grid_balance_rule)
 
-        def bess_energy_rule(m, t):
-            charge    = eff * delta * m.Pbess_charge[t]
-            discharge = delta * m.Pbess_discharge[t] / eff
-            loss      = beta * delta * m.E_bess[t]
+        def bess_energy_rule(m, s, t, b):
+            charge    = eff * delta * m.Pbess_charge[s, t, b]
+            discharge = delta * m.Pbess_discharge[s, t, b] / eff
+            loss      = beta * delta * m.E_bess[s, t, b]
 
             if t == 0:
-                E_prev = init_cap
+                E_prev = m.E_bess_init
             else:
-                E_prev = m.E_bess[t-1]
-            return m.E_bess[t] == E_prev + charge - discharge - loss
-        m.bess_energy = pyo.Constraint(m.T, rule=bess_energy_rule)
+                E_prev = m.E_bess[s, t-1, b]
+            return m.E_bess[s, t, b] == E_prev + charge - discharge - loss
+        m.bess_energy = pyo.Constraint(m.S, m.T, m.B, rule=bess_energy_rule)
+
+
+        dur = self.blackout['duracao']
+
+        def blackout_grid_rule(m, s, t, b):
+            if t in range(b, min(b + dur, len(self.tariff_buy))): # Rede indisponível
+                return (0, m.Pgrid_buy[s, t, b], 0) # 0 <= Pgrid_buy <= 0 
+            return pyo.Constraint.Skip
+
+        def blackout_sell_rule(m, s, t, b):
+            if t in range(b, min(b + dur, len(self.tariff_buy))):
+                return (0, m.Pgrid_sell[s, t, b], 0)
+            return pyo.Constraint.Skip
+
+        m.blackout_grid     = pyo.Constraint(m.S, m.T, m.B, rule=blackout_grid_rule)
+        m.blackout_sell_con = pyo.Constraint(m.S, m.T, m.B, rule=blackout_sell_rule)
+
 
         # Objetivo ──────────────────────────────────────────────────────────────────────
                 
-        self.CAPEX_BESS   = 56 * 4.96     # BRL/kWh
-        CAPEX_PV     = 1200 * 4.96   # BRL/kWh/dia
+        self.CAPEX_BESS   = 2500 #* 4.96     # BRL/kWh
+        CAPEX_PV     = 1200 #* 4.96   # BRL/kWh/dia
         
-        self.OPEX         = 365 * self.delta * sum(m.prob[s] * sum(m.tariff[t] * m.Pgrid_buy[s, t] - 0.7 * m.tariff[t] * m.Pgrid_sell[s, t]for t in m.T)for s in m.S)
+        self.OPEX         = 365 * self.delta * sum(m.blackout_prob[b] * m.prob[s] * (m.tariff[t] * m.Pgrid_buy[s, t, b] - 0.7 * m.tariff[t] * m.Pgrid_sell[s, t, b]) for b in m.B for s in m.S for t in m.T)
         
         # r. infl
         self.r = 0.05
+        self.horizon = 25 # anos
         
         def objective_rule(m):
-            NPV = sum((self.OPEX ) / ((1 + self.r) ** year) for year in range(10))
+            NPV = sum((self.OPEX ) / ((1 + self.r) ** year) for year in range(25))
             return (m.BESS_capacity * self.CAPEX_BESS + NPV + m.PV_Pmax  * CAPEX_PV) # anual
             
         self.objective = m.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
@@ -189,19 +225,24 @@ class SmartHomeStochastic:
             return
 
         # Coleta resultados em self.results para o plot usar depois
+
+        # ✅ — escolhe um b representativo para exibir (ex: sem blackout = b=0)
+        # ou agrega. Mais simples: reportar o cenário sem blackout de cada s
+        b_ref = list(self.blackout['prob_por_horario'].keys())[0]
+        
         for s in m.S:
             rows = []
             for t in m.T:
                 rows.append({
                     'Hora':            t,
-                    'Rede_compra':     pyo.value(m.Pgrid_buy[s, t]),
-                    'Rede_venda':      pyo.value(m.Pgrid_sell[s, t]),
+                    'Rede_compra':     pyo.value(m.Pgrid_buy[s, t, b_ref]),
+                    'Rede_venda':      pyo.value(m.Pgrid_sell[s, t, b_ref]),
                     'PV':              pyo.value(m.P_pv[s, t]) * pyo.value(m.PV_Pmax),
                     'Demanda':         pyo.value(m.P_demand[s, t]),
-                    'BESS_carga':      pyo.value(m.Pbess_charge[t]),
-                    'BESS_descarga':   pyo.value(m.Pbess_discharge[t]),
-                    'E_BESS':          pyo.value(m.E_bess[t]),
-                    'state':           int(round(pyo.value(m.state[t]))),
+                    'BESS_carga':      pyo.value(m.Pbess_charge[s, t, b_ref]),
+                    'BESS_descarga':   pyo.value(m.Pbess_discharge[s, t, b_ref]),
+                    'E_BESS':          pyo.value(m.E_bess[s, t, b_ref]),
+                    'state':           int(round(pyo.value(m.state[s, t, b_ref]))),
                 })
 
             df = pd.DataFrame(rows)
@@ -226,7 +267,7 @@ class SmartHomeStochastic:
             ["PV instalado",        f"{pv_opt:.1f} kWp"],
             ["BESS instalado",      f"{bess_opt:.1f} kWh"],
             ["Custo total (VPL)",   f"R$ {obj_opt:,.0f}"],
-            ["Horizonte",           "10 anos  |  r = 5%"],
+            ["Horizonte",           f"{self.horizon} anos  |  r = 5%"],
             ["Cenários",            "base (60%)  |  alta geração (20%)  |  alta demanda (20%)"],
         ]
 
@@ -234,7 +275,7 @@ class SmartHomeStochastic:
             cellText=dados,
             colLabels=["Parâmetro", "Valor ótimo"],
             cellLoc='left',
-            loc='center',
+            loc='center',  
             colWidths=[0.42, 0.58],
         )
         tabela.auto_set_font_size(False)
@@ -261,11 +302,11 @@ class SmartHomeStochastic:
 
         STYLE = {
             'demand': dict(color='#9ca3af', linewidth=1.6, linestyle='--', alpha=0.9,   label='Demanda'),
-            'pv':     dict(color='#f59e0b', linewidth=2.5, linestyle=':',               label='PV gerado'),
-            'buy':    dict(color='#3b82f6', linewidth=2.5, linestyle='-',               label='Rede compra'),
-            'sell':   dict(color="#00d68b", linewidth=2.5, linestyle='-',               label='Rede venda'),
-            'dis':    dict(color="#c15531", linewidth=2.0,                              label='BESS descarga'),
-            'ch':     dict(color="#3d1c0c", linewidth=2.0,                              label='BESS carga'),
+            'pv':     dict(color="#ffa811", linewidth=2.5, linestyle=':',               label='PV gerado'),
+            'buy':    dict(color="#04b82e", linewidth=2.5, linestyle='-',               label='Rede compra'),
+            'sell':   dict(color="#d60000", linewidth=2.5, linestyle='-',               label='Rede venda'),
+            'dis':    dict(color="#E06C1A", linewidth=2.0,                              label='BESS descarga'),
+            'ch':     dict(color="#3a49ed", linewidth=2.0,                              label='BESS carga'),
         }
 
         for i, s in enumerate(cenarios):
@@ -312,7 +353,7 @@ class SmartHomeStochastic:
         plt.tight_layout()
         plt.show()
 # ── Execução ───────────────────────────────────────────────────────────────────
-sh = SmartHomeStochastic(scenarios, tariff_buy)
+sh = SmartHomeStochastic(scenarios, tariff_buy, blackout)
 sh.build()
 sh.solve()
 sh.plot()
