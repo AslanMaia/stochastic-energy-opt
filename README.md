@@ -21,24 +21,6 @@ Rather than optimizing for a single forecast, the model hedges: it commits to si
 
 ---
 
-## System Architecture
-
-```
-                    ☀️  PV Generation (uncertain)
-                           │
-              ┌────────────▼────────────┐
-              │                         │
-        🔋 Battery Storage         🏠 Demand (uncertain)
-              │                         │
-              └────────────┬────────────┘
-                           │
-                    ⚡ Grid (buy / sell / blackout)
-```
-
-The community can draw from the grid, export surplus, and charge or discharge the battery — all subject to physical constraints, time-of-use tariffs, and probabilistic grid outage windows.
-
----
-
 ## Two-Stage Stochastic Structure
 
 ```mermaid
