@@ -2,7 +2,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
 ![Pyomo](https://img.shields.io/badge/Optimization-Pyomo-orange)
-![Solver](https://img.shields.io/badge/Solver-HiGHS%20%7C%20Gurobi-green)
+![Solver](https://img.shields.io/badge/Solver-Gurobi-green)
 ![FAPESP](https://img.shields.io/badge/Funding-FAPESP-red)
 ![UNICAMP](https://img.shields.io/badge/Institution-UNICAMP-blue)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
@@ -13,29 +13,11 @@
 
 ## What This Project Does
 
-Solar generation peaks at noon. Electricity prices peak in the evening. Demand is unpredictable.
+Solar generation peaks at noon. Electricity prices peak in the evening. Demand is unpredictable. Grid outages happen.
 
-This repository implements a **two-stage stochastic MILP** that decides — before the day unfolds — how to operate a residential energy community's battery storage so that expected energy costs are minimized across all plausible scenarios of generation and demand.
+This repository implements a **two-stage stochastic MILP** that decides — before the day unfolds — the optimal sizing of a residential solar PV system and battery storage (BESS), minimizing the net present value (NPV) of total investment and operational costs over a 25-year horizon across all plausible scenarios of generation, demand, and grid availability.
 
-Rather than optimizing for a single forecast and hoping it holds, the model hedges: it commits to a storage schedule robust enough to perform well whether tomorrow is sunny, cloudy, high-demand or low-demand.
-
----
-
-## System Architecture
-
-```
-                    ☀️  PV Generation (uncertain)
-                           │
-              ┌────────────▼────────────┐
-              │                         │
-        🔋 Battery Storage         🏠 Demand (uncertain)
-              │                         │
-              └────────────┬────────────┘
-                           │
-                    ⚡ Grid (buy / sell)
-```
-
-The community can draw from the grid, export surplus, and charge or discharge the battery — all subject to physical constraints and time-of-use tariffs.
+Rather than optimizing for a single forecast, the model hedges: it commits to sizing decisions robust enough to perform well whether tomorrow is sunny, cloudy, high-demand, or affected by a blackout.
 
 ---
 
@@ -57,64 +39,8 @@ flowchart LR
 
 | Stage | Decisions | Timing |
 |-------|-----------|--------|
-| **First** | Battery charge/discharge schedule, storage sizing | Before uncertainty is revealed |
-| **Second** | Grid power flows (buy/sell), adjusted per scenario | After scenario is known |
-
----
-
-## Key Performance Metric: VSS
-
-The **Value of the Stochastic Solution** measures how much better the stochastic model performs compared to naively optimizing for a single average scenario:
-
-$$\text{VSS} = z^{EV} - z^{RP}$$
-
-where $z^{RP}$ is the optimal expected cost under the stochastic model and $z^{EV}$ is the cost of the deterministic (expected-value) solution when applied to all scenarios. A higher VSS means uncertainty matters more and stochastic modeling adds more value.
-
----
-
-## Repository Structure
-
-```
-stochastic-energy-opt/
-└── program/
-    ├── main.py               # Entry point
-    ├── data/
-    │   └── inputs.py         # Load profiles, PV data, tariffs, scenarios
-    ├── model/
-    │   └── smart_home.py     # SmartHomeStochastic class (build + solve)
-    └── analysis/
-        └── plot.py           # Result visualization
-```
-
----
-
-## Installation
-
-No `requirements.txt` needed — install dependencies directly:
-
-```bash
-pip install pyomo pandas matplotlib highspy
-```
-
-| Package | Purpose |
-|---------|---------|
-| `pyomo` | Algebraic modeling language for the MILP |
-| `pandas` | Result collection and tabular output |
-| `matplotlib` | Operational dispatch plots |
-| `highspy` | Open-source MILP solver (HiGHS Python interface) |
-
-> **Optional:** If you have a Gurobi license, replace `SolverFactory('highs')` with `SolverFactory('gurobi')` in `model/smart_home.py` for faster solves on larger instances.
-
----
-
-## Running the Model
-
-```bash
-cd program
-python main.py
-```
-
-The solver will print the optimal expected daily cost and a per-scenario dispatch table, then display the operational plots.
+| **First** | PV system size (`PV_Pmax`), BESS capacity (`BESS_capacity`), initial state of energy | Before uncertainty is revealed |
+| **Second** | Grid power flows (buy/sell), BESS charge/discharge dispatch per scenario and blackout window | After scenario and outage are known |
 
 ---
 
@@ -130,31 +56,71 @@ Three scenarios capture the joint uncertainty in PV generation and electricity d
 
 ---
 
-## Mathematical Formulation (Compact)
+## Blackout Modeling
 
-**Objective** — minimize expected daily cost:
+Grid outages are modeled as an independent, uniformly distributed event across 8 possible start times (every 3 hours), each lasting 3 hours. The total annual outage probability is 5%.
 
-$$\min \; c_{\text{BESS}} \cdot E^{\text{cap}} + \sum_{s \in S} \pi_s \sum_{t \in T} \left[ \lambda_t \cdot P^{\text{buy}}_{s,t} - 0.7\lambda_t \cdot P^{\text{sell}}_{s,t} \right]$$
+During a blackout window, both `Pgrid_buy` and `Pgrid_sell` are forced to zero, requiring the BESS to fully cover local demand from storage alone.
 
-**Power balance** (per scenario, per hour):
-
-$$P^{\text{buy}}_{s,t} + P^{\text{PV}}_{s,t} + P^{\text{dis}}_t = P^{\text{sell}}_{s,t} + P^{\text{dem}}_{s,t} + P^{\text{ch}}_t$$
-
-**Battery state of energy:**
-
-$$E_t = E_{t-1} + \eta \cdot P^{\text{ch}}_t - \frac{P^{\text{dis}}_t}{\eta} - \beta \cdot E_{t-1}$$
-
-**Mutual exclusion** (no simultaneous charge and discharge):
-
-$$P^{\text{ch}}_t \leq \delta_t \cdot M, \quad P^{\text{dis}}_t \leq (1 - \delta_t) \cdot M, \quad \delta_t \in \{0,1\}$$
+| Parameter | Value |
+|-----------|-------|
+| Total probability | 5% |
+| Start times | 0, 3, 6, 9, 12, 15, 18, 21 h |
+| Duration | 3 hours |
+| Distribution | Uniform across start times |
 
 ---
 
-## Research Context
+## Mathematical Formulation
 
-This project is developed as part of an undergraduate research grant (*Iniciação Científica*) funded by **FAPESP**, within the Center for Energy Planning and Technology (**CPTEn**), at the School of Electrical and Computer Engineering (**FEEC**), University of Campinas (**UNICAMP**), under the supervision of **Prof. Dr. Marcos J. Rider Flores (DSE/FEEC/UNICAMP)**.
+**Objective** — minimize NPV of investment and operational costs over 25 years:
 
-A research internship (**BEPE/FAPESP**) at the **University of Melbourne** under **Prof. Luis Ochoa** is associated with this project.
+$$\min \; C_{\text{BESS}} \cdot E^{\text{cap}} + C_{\text{PV}} \cdot P^{\text{PV}}_{\max} + \sum_{y=0}^{24} \frac{\text{OPEX}}{(1+r)^y}$$
+
+where the annual OPEX is the expected daily dispatch cost scaled to 365 days:
+
+$$\text{OPEX} = 365 \sum_{b \in B} \sum_{s \in S} \sum_{t \in T} \pi_b \cdot \pi_s \left[ \lambda_t \cdot P^{\text{buy}}_{s,t,b} - 0.7\lambda_t \cdot P^{\text{sell}}_{s,t,b} \right]$$
+
+**Power balance** (per scenario $s$, hour $t$, blackout window $b$):
+
+$$P^{\text{buy}}_{s,t,b} + P^{\text{PV}}_{s,t} \cdot P^{\text{PV}}_{\max} + P^{\text{dis}}_{s,t,b} = P^{\text{sell}}_{s,t,b} + P^{\text{dem}}_{s,t} + P^{\text{ch}}_{s,t,b}$$
+
+**Battery state of energy:**
+
+$$E_{s,t,b} = E_{s,t-1,b} + \eta \cdot P^{\text{ch}}_{s,t,b} - \frac{P^{\text{dis}}_{s,t,b}}{\eta} - \beta \cdot E_{s,t,b}$$
+
+**Mutual exclusion** (no simultaneous charge and discharge):
+
+$$P^{\text{ch}}_{s,t,b} \leq \delta_{s,t,b} \cdot M, \quad P^{\text{dis}}_{s,t,b} \leq (1 - \delta_{s,t,b}) \cdot M, \quad \delta_{s,t,b} \in \{0,1\}$$
+
+**Blackout constraints:**
+
+$$P^{\text{buy}}_{s,t,b} = 0 \quad \text{and} \quad P^{\text{sell}}_{s,t,b} = 0 \quad \forall\, t \in [b,\, b + \text{dur})$$
+
+---
+
+## Key Parameters
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `eff` | 0.90 | Round-trip efficiency (charge and discharge) |
+| `beta` | 0.01 | Self-discharge rate per hour |
+| `CAPEX_BESS` | 2500 BRL/kWh | Battery investment cost |
+| `CAPEX_PV` | 1200 BRL/kWp | PV investment cost |
+| `r` | 5% | Discount rate |
+| `horizon` | 25 years | Project lifetime |
+| `Pmax_grid` | 20 kW | Grid connection limit |
+| C-rate limit | 0.5 | `BESS_Pmax ≤ 0.5 × BESS_capacity` |
+
+---
+
+## Installation
+
+```bash
+pip install pyomo pandas matplotlib
+```
+
+A valid **Gurobi license** is required. Academic licenses are available free of charge at [gurobi.com](https://www.gurobi.com/academia/academic-program-and-licenses/).
 
 ---
 
