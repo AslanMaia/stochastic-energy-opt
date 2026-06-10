@@ -114,16 +114,16 @@ $$P^{\text{buy}}_{s,t,b} = 0 \quad \text{and} \quad P^{\text{sell}}_{s,t,b} = 0 
 
 ---
 
-## Installation
+## Project Structure
 
-```bash
-pip install pyomo pandas matplotlib
+```
+stochastic-energy-opt/
+├── v2.1.py            # Main model — data, SmartHomeStochastic class, entry point
+├── requirements.txt   # Python dependencies
+├── LICENSE
+└── README.md
 ```
 
-A valid **Gurobi license** is required. Academic licenses are available free of charge at [gurobi.com](https://www.gurobi.com/academia/academic-program-and-licenses/).
+`v2.1.py` is organized in three sections:
 
----
-
-## License
-
-MIT — see `LICENSE` for details.
+- **Data** 
