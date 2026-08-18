@@ -123,10 +123,7 @@ class SmartHomeStochastic:
             return m.Pbess_discharge[s, t, b] <= m.BESS_Pmax
         m.discharge_limit = pyo.Constraint(m.S, m.T, m.B, rule=discharge_limit_rule)
 
-        def befficiency_limit_rule(m, t):
-            return m.BESS_Pmax <= m.BESS_capacity * 0.5  # força BESS_Pmax a ser menor usando C-rate
-        m.befficiency_limit = pyo.Constraint(m.T, rule=befficiency_limit_rule)
-        # Investigar -> m.befficiency_limit = pyo.Constraint(expr=m.BESS_Pmax <= m.BESS_capacity * 0.5)
+        m.befficiency_limit = pyo.Constraint(expr=m.BESS_Pmax <= m.BESS_capacity * 0.5)
         
         def init_capacity_limit(m):
             return m.E_bess_init <= m.BESS_capacity
@@ -179,7 +176,7 @@ class SmartHomeStochastic:
 
         def blackout_grid_rule(m, s, t, b):
             if t in range(b, min(b + dur, len(self.tariff_buy))): # Rede indisponível
-                return (0, m.Pgrid_buy[s, t, b], 0) # 0 <= Pgrid_buy <= 0 
+                return m.Pgrid_buy[s, t, b] == 0
             return pyo.Constraint.Skip
 
         def blackout_sell_rule(m, s, t, b):
@@ -206,7 +203,7 @@ class SmartHomeStochastic:
             NPV = sum((self.OPEX ) / ((1 + self.r) ** year) for year in range(25))
             return (m.BESS_capacity * self.CAPEX_BESS + NPV + m.PV_Pmax  * CAPEX_PV) # anual
             
-        self.objective = m.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
+        self.objective = m.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)   
 
         self.model = m
 
