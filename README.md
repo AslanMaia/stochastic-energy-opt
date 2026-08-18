@@ -21,98 +21,330 @@ Rather than optimizing for a single forecast, the model hedges: it commits to si
 
 ---
 
-## Two-Stage Stochastic Structure
-
-```mermaid
-flowchart LR
-    A([📋 Here-and-Now\nFirst Stage]) -->|commit before\nuncertainty resolves| B{Scenarios\nrevealed}
-    B -->|☀️ High generation\nπ = 0.20| C([⚙️ Recourse\nSecond Stage])
-    B -->|⚖️ Base case\nπ = 0.60| D([⚙️ Recourse\nSecond Stage])
-    B -->|🌩️ High demand\nπ = 0.20| E([⚙️ Recourse\nSecond Stage])
-
-    style A fill:#4a90d9,color:#fff
-    style B fill:#f5a623,color:#fff
-    style C fill:#7ed321,color:#fff
-    style D fill:#7ed321,color:#fff
-    style E fill:#7ed321,color:#fff
-```
-
-| Stage | Decisions | Timing |
-|-------|-----------|--------|
-| **First** | PV system size (`PV_Pmax`), BESS capacity (`BESS_capacity`), initial state of energy | Before uncertainty is revealed |
-| **Second** | Grid power flows (buy/sell), BESS charge/discharge dispatch per scenario and blackout window | After scenario and outage are known |
-
----
-
-## Scenario Design
-
-Three scenarios capture the joint uncertainty in PV generation and electricity demand:
-
-| Scenario | Demand | PV Generation | Probability |
-|----------|--------|--------------|-------------|
-| Base | Nominal | Nominal | 60% |
-| High demand | +50% | −50% | 20% |
-| High generation | −50% | +50% | 20% |
-
----
-
-## Blackout Modeling
-
-Grid outages are modeled as an independent, uniformly distributed event across 8 possible start times (every 3 hours), each lasting 3 hours. The total annual outage probability is 5%.
-
-During a blackout window, both `Pgrid_buy` and `Pgrid_sell` are forced to zero, requiring the BESS to fully cover local demand from storage alone.
-
-| Parameter | Value |
-|-----------|-------|
-| Total probability | 5% |
-| Start times | 0, 3, 6, 9, 12, 15, 18, 21 h |
-| Duration | 3 hours |
-| Distribution | Uniform across start times |
-
----
-
 ## Mathematical Formulation
-
-**Objective** — minimize NPV of investment and operational costs over 25 years:
-
-$$\min \; C_{\text{BESS}} \cdot E^{\text{cap}} + C_{\text{PV}} \cdot P^{\text{PV}}_{\max} + \sum_{y=0}^{24} \frac{\text{OPEX}}{(1+r)^y}$$
-
-where the annual OPEX is the expected daily dispatch cost scaled to 365 days:
-
-$$\text{OPEX} = 365 \sum_{b \in B} \sum_{s \in S} \sum_{t \in T} \pi_b \cdot \pi_s \left[ \lambda_t \cdot P^{\text{buy}}_{s,t,b} - 0.7\lambda_t \cdot P^{\text{sell}}_{s,t,b} \right]$$
-
-**Power balance** (per scenario $s$, hour $t$, blackout window $b$):
-
-$$P^{\text{buy}}_{s,t,b} + P^{\text{PV}}_{s,t} \cdot P^{\text{PV}}_{\max} + P^{\text{dis}}_{s,t,b} = P^{\text{sell}}_{s,t,b} + P^{\text{dem}}_{s,t} + P^{\text{ch}}_{s,t,b}$$
-
-**Battery state of energy:**
-
-$$E_{s,t,b} = E_{s,t-1,b} + \eta \cdot P^{\text{ch}}_{s,t,b} - \frac{P^{\text{dis}}_{s,t,b}}{\eta} - \beta \cdot E_{s,t,b}$$
-
-**Mutual exclusion** (no simultaneous charge and discharge):
-
-$$P^{\text{ch}}_{s,t,b} \leq \delta_{s,t,b} \cdot M, \quad P^{\text{dis}}_{s,t,b} \leq (1 - \delta_{s,t,b}) \cdot M, \quad \delta_{s,t,b} \in \{0,1\}$$
-
-**Blackout constraints:**
-
-$$P^{\text{buy}}_{s,t,b} = 0 \quad \text{and} \quad P^{\text{sell}}_{s,t,b} = 0 \quad \forall\, t \in [b,\, b + \text{dur})$$
+# Stochastic Operation of an Export-Constrained Energy Community with Hybrid Battery--Hydrogen Storage
 
 ---
 
-## Key Parameters
+## 1. Summary
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `eff` | 0.90 | Round-trip efficiency (charge and discharge) |
-| `beta` | 0.01 | Self-discharge rate per hour |
-| `CAPEX_BESS` | 2500 BRL/kWh | Battery investment cost |
-| `CAPEX_PV` | 1200 BRL/kWp | PV investment cost |
-| `r` | 5% | Discount rate |
-| `horizon` | 25 years | Project lifetime |
-| `Pmax_grid` | 20 kW | Grid connection limit |
-| C-rate limit | 0.5 | `BESS_Pmax ≤ 0.5 × BESS_capacity` |
+This work summarizes a candidate mathematical formulation for a grid-connected energy community (EC) operated by a centralized energy management system (EMS). The EC consists of several users, each with individual photovoltaic (PV) generation and demand, and shared community assets: a battery energy storage system (BESS) and a hydrogen energy storage system (HESS), composed of an electrolyzer, hydrogen tank, and fuel cell. The EC is connected to the main grid through a point of common coupling (PCC).
+
+The proposed formulation follows a two-stage stochastic structure over a multi-day horizon. The first-stage decisions are common to all scenarios, whereas the second-stage decisions adapt to the realized PV and demand scenario. The model minimizes the expected operating cost of the community while:
+
+1. Limiting or discouraging surplus export to the distribution grid.
+2. Guaranteeing that all members obtain nonnegative expected gains with respect to their standalone operation.
+3. Optionally imposing carbon-emission limits or using a multi-objective cost--emission framework.
 
 ---
+
+## 2. Sets and indices
+
+| Symbol | Description |
+| :--- | :--- |
+| $\mathcal{I}$ | Set of users/community members, indexed by $i$ |
+| $\mathcal{T}$ | Set of time periods, indexed by $t$ |
+| $\mathcal{T}^{1}$ | First-stage periods, e.g., day 1 |
+| $\mathcal{T}^{2}$ | Second-stage periods, e.g., days 2--3 |
+| $\Omega$ | Set of scenarios, indexed by $\omega$ |
+
+The time horizon is partitioned as:
+$$ \mathcal{T}=\mathcal{T}^{1}\cup\mathcal{T}^{2} $$
+
+---
+
+## 3. Parameters
+
+| Symbol | Description |
+| :--- | :--- |
+| $\pi_{\omega}$ | Probability of scenario $\omega$ |
+| $\Delta t$ | Duration of each time period |
+| $d_{i,t,\omega}$ | Demand of user $i$ at time $t$ in scenario $\omega$ |
+| $\overline{p}^{PV}_{i,t,\omega}$ | Available PV generation of user $i$ |
+| $\lambda^{buy}_{t}$ | Grid energy buying tariff |
+| $\lambda^{sell}_{t}$ | Grid energy selling tariff |
+| $\overline{P}^{imp}$ | Maximum import power at the PCC |
+| $\overline{P}^{exp}_{t}$ | Maximum export power allowed at the PCC |
+| $\eta^{B,ch}, \eta^{B,dis}$ | BESS charging and discharging efficiencies |
+| $\sigma^{B}$ | BESS self-discharge rate per time step |
+| $\underline{E}^{B}, \overline{E}^{B}$ | Minimum and maximum BESS state of charge |
+| $\overline{P}^{B,ch}, \overline{P}^{B,dis}$ | Maximum BESS charging and discharging powers |
+| $E^{B,ini}$ | Initial BESS state of charge |
+| $\eta^{EL}$ | Electrolyzer conversion factor from electricity to hydrogen |
+| $\eta^{FC}$ | Fuel-cell conversion factor from hydrogen to electricity |
+| $\sigma^{H}$ | Hydrogen storage loss rate per time step |
+| $\overline{H}$ | Maximum hydrogen inventory |
+| $\overline{P}^{EL}, \overline{P}^{FC}$ | Electrolyzer and fuel-cell rated powers |
+| $H^{ini}$ | Initial hydrogen inventory |
+| $c^{curt}$ | PV curtailment penalty |
+| $c^{B}$ | BESS cycling/operation cost coefficient |
+| $c^{H2}$ | Hydrogen operation cost coefficient |
+| $\rho^{exp}$ | Optional export penalty coefficient |
+| $\gamma^{grid}_{t}$ | Grid emission factor |
+| $\gamma^{H2}$ | Optional hydrogen-related emission factor, if applicable |
+| $\overline{E}^{CO2}$ | Maximum expected carbon emissions |
+| $\varepsilon$ | Minimum relative gain required for all users |
+
+---
+
+## 4. Standalone benchmark of each user
+
+Before solving the coordinated EC model, the expected standalone cost of each user is computed. In standalone operation, user $i$ operates independently with its own PV, demand, and grid import/export, but without access to shared BESS, hydrogen storage, or community energy sharing.
+
+The standalone power balance is:
+$$ p^{imp,stand}_{i,t,\omega}+p^{PV,stand}_{i,t,\omega} =d_{i,t,\omega}+p^{exp,stand}_{i,t,\omega}, \quad \forall i\in\mathcal{I},\; t\in\mathcal{T},\; \omega\in\Omega $$
+
+PV generation is limited by availability:
+$$ 0\le p^{PV,stand}_{i,t,\omega}\le \overline{p}^{PV}_{i,t,\omega}, \quad \forall i,t,\omega $$
+
+The standalone operating cost of user $i$ in scenario $\omega$ is:
+$$ C^{stand}_{i,\omega}=\sum_{t\in\mathcal{T}}\Delta t \left(\lambda^{buy}_{t}p^{imp,stand}_{i,t,\omega} -\lambda^{sell}_{t}p^{exp,stand}_{i,t,\omega}\right) $$
+
+The expected standalone benchmark is:
+$$ B_i=\sum_{\omega\in\Omega}\pi_{\omega}C^{stand}_{i,\omega}, \quad \forall i\in\mathcal{I} $$
+
+This value represents the expected net electricity bill of user $i$ when operating alone.
+
+---
+
+## 5. Decision variables of the coordinated EC model
+
+| Variable | Description |
+| :--- | :--- |
+| $p^{PV}_{i,t,\omega}$ | PV generation used from user $i$ |
+| $p^{imp}_{t,\omega}$ | Grid import at the PCC |
+| $p^{exp}_{t,\omega}$ | Grid export at the PCC |
+| $p^{curt}_{t,\omega}$ | PV curtailment |
+| $p^{B,ch}_{t,\omega}$ | BESS charging power |
+| $p^{B,dis}_{t,\omega}$ | BESS discharging power |
+| $E^{B}_{t,\omega}$ | BESS state of charge |
+| $u^{B}_{t,\omega}$ | Binary variable for BESS charging/discharging mode |
+| $p^{EL}_{t,\omega}$ | Electrolyzer power consumption |
+| $h^{prod}_{t,\omega}$ | Hydrogen produced by the electrolyzer |
+| $h^{FC}_{t,\omega}$ | Hydrogen consumed by the fuel cell |
+| $p^{FC}_{t,\omega}$ | Fuel-cell electricity generation |
+| $H_{t,\omega}$ | Hydrogen inventory in the tank |
+| $u^{EL}_{t,\omega}, u^{FC}_{t,\omega}$ | Binary variables for electrolyzer and fuel-cell operation |
+| $g_i$ | Expected gain allocated to user $i$ |
+| $z$ | Minimum relative gain among all users |
+
+---
+
+## 6. Objective function
+
+The main objective is to minimize the expected operating cost of the coordinated EC:
+$$ \min C^{EC} $$
+
+where:
+$$ C^{EC}=\sum_{\omega\in\Omega}\pi_{\omega} \sum_{t\in\mathcal{T}}\Delta t \left[ \lambda^{buy}_{t}p^{imp}_{t,\omega} -\lambda^{sell}_{t}p^{exp}_{t,\omega} +c^{curt}p^{curt}_{t,\omega} +c^{B}\left(p^{B,ch}_{t,\omega}+p^{B,dis}_{t,\omega}\right) +c^{H2}p^{EL}_{t,\omega} +\rho^{exp}p^{exp}_{t,\omega} \right] $$
+
+The term $\rho^{exp}p^{exp}_{t,\omega}$ is optional. If export is controlled through a hard PCC cap, $\rho^{exp}$ may be set to zero. If exports are only discouraged, $\rho^{exp}>0$ may be used as a soft penalty.
+
+---
+
+## 7. Community energy balance
+
+The coordinated EC power balance is:
+$$ \sum_{i\in\mathcal{I}}p^{PV}_{i,t,\omega} +p^{imp}_{t,\omega} +p^{B,dis}_{t,\omega} +p^{FC}_{t,\omega} = \sum_{i\in\mathcal{I}}d_{i,t,\omega} +p^{B,ch}_{t,\omega} +p^{EL}_{t,\omega} +p^{exp}_{t,\omega}, \quad \forall t\in\mathcal{T},\; \omega\in\Omega $$
+
+PV generation is limited by availability:
+$$ 0\le p^{PV}_{i,t,\omega}\le \overline{p}^{PV}_{i,t,\omega}, \quad \forall i,t,\omega $$
+
+PV curtailment is defined as:
+$$ p^{curt}_{t,\omega}=\sum_{i\in\mathcal{I}} \left(\overline{p}^{PV}_{i,t,\omega}-p^{PV}_{i,t,\omega}\right), \quad \forall t,\omega $$
+
+---
+
+## 8. Grid import/export and PCC export restriction
+
+The grid exchange limits are:
+$$ 0\le p^{imp}_{t,\omega}\le \overline{P}^{imp}, \quad \forall t,\omega $$
+
+$$ 0\le p^{exp}_{t,\omega}\le \overline{P}^{exp}_{t}, \quad \forall t,\omega $$
+
+The export limit may be parameterized as:
+$$ \overline{P}^{exp}_{t}=\alpha \overline{P}^{PCC} $$
+
+where $\alpha$ represents the export-permission level. For example, $\alpha=1$ represents free export, whereas $\alpha=0$ represents a zero-export policy.
+
+---
+
+## 9. BESS model
+
+The BESS state-of-charge equation is:
+$$ E^{B}_{t,\omega}=(1-\sigma^{B})E^{B}_{t-1,\omega}
++\eta^{B,ch}p^{B,ch}_{t,\omega}\Delta t
+-\frac{p^{B,dis}_{t,\omega}\Delta t}{\eta^{B,dis}},
+\quad \forall t,\omega. $$
+
+The BESS energy limits are:
+$$ \underline{E}^{B}\le E^{B}_{t,\omega}\le \overline{E}^{B},
+\quad \forall t,\omega. $$
+
+The BESS charging and discharging limits are:
+$$ 0\le p^{B,ch}_{t,\omega}\le \overline{P}^{B,ch}u^{B}_{t,\omega},
+\quad \forall t,\omega, $$
+
+$$ 0\le p^{B,dis}_{t,\omega}\le \overline{P}^{B,dis}(1-u^{B}_{t,\omega}),
+\quad \forall t,\omega, $$
+
+$$ u^{B}_{t,\omega}\in\{0,1\},
+\quad \forall t,\omega. $$
+
+The initial condition is:
+$$ E^{B}_{0,\omega}=E^{B,ini},
+\quad \forall \omega. $$
+
+A terminal condition may be imposed to avoid artificial depletion:
+$$ E^{B}_{|\mathcal{T}|,\omega}\ge E^{B,ini},
+\quad \forall \omega, $$
+
+or, more strictly,
+$$ E^{B}_{|\mathcal{T}|,\omega}=E^{B,ini},
+\quad \forall \omega. $$
+
+---
+
+## 10. Hydrogen storage model
+
+Hydrogen production by the electrolyzer is modeled as:
+$$ h^{prod}_{t,\omega}=\eta^{EL}p^{EL}_{t,\omega}\Delta t,
+\quad \forall t,\omega. $$
+
+The fuel-cell conversion is represented by:
+$$ p^{FC}_{t,\omega}\Delta t=\eta^{FC}h^{FC}_{t,\omega},
+\quad \forall t,\omega. $$
+
+The hydrogen inventory balance is:
+$$ H_{t,\omega}=(1-\sigma^{H})H_{t-1,\omega}
++h^{prod}_{t,\omega}-h^{FC}_{t,\omega},
+\quad \forall t,\omega. $$
+
+The hydrogen storage limits are:
+$$ 0\le H_{t,\omega}\le \overline{H},
+\quad \forall t,\omega. $$
+
+The electrolyzer and fuel-cell power limits are:
+$$ 0\le p^{EL}_{t,\omega}\le \overline{P}^{EL}u^{EL}_{t,\omega},
+\quad \forall t,\omega, $$
+
+$$ 0\le p^{FC}_{t,\omega}\le \overline{P}^{FC}u^{FC}_{t,\omega},
+\quad \forall t,\omega. $$
+
+Simultaneous hydrogen production and electricity generation are avoided through:
+$$ u^{EL}_{t,\omega}+u^{FC}_{t,\omega}\le 1,
+\quad \forall t,\omega, $$
+
+$$ u^{EL}_{t,\omega},u^{FC}_{t,\omega}\in\{0,1\},
+\quad \forall t,\omega. $$
+
+The initial and terminal hydrogen conditions are:
+$$ H_{0,\omega}=H^{ini},
+\quad \forall \omega, $$
+
+$$ H_{|\mathcal{T}|,\omega}\ge H^{ini},
+\quad \forall \omega, $$
+
+or, if cyclic operation is preferred:
+$$ H_{|\mathcal{T}|,\omega}=H^{ini},
+\quad \forall \omega. $$
+
+---
+
+## 11. Two-stage stochastic structure
+
+For first-stage periods, the decisions must be non-anticipative. Let $x_{t,\omega}$ be the vector of operational variables at time $t$ and scenario $\omega$. Then,
+$$ x_{t,\omega}=x_{t,\omega'},
+\quad \forall t\in\mathcal{T}^{1},\; \forall \omega,\omega'\in\Omega. $$
+
+For the proposed model, $x_{t,\omega}$ may include:
+$$ x_{t,\omega}=\left\{
+ p^{imp}_{t,\omega},p^{exp}_{t,\omega},p^{B,ch}_{t,\omega},p^{B,dis}_{t,\omega},E^{B}_{t,\omega},
+ p^{EL}_{t,\omega},p^{FC}_{t,\omega},H_{t,\omega}
+\right\}. $$
+
+Second-stage decisions, for $t\in\mathcal{T}^{2}$, are scenario-dependent.
+
+---
+
+## 12. Community gain allocation and participation guarantee
+
+The total expected gain created by community operation is:
+$$ G=\sum_{i\in\mathcal{I}}B_i-C^{EC}. $$
+
+The gain is allocated among users through variables $g_i$:
+$$ \sum_{i\in\mathcal{I}}g_i=\sum_{i\in\mathcal{I}}B_i-C^{EC}. $$
+
+To guarantee that no user is worse off by joining the community, the following individual rationality condition is imposed:
+$$ g_i\ge 0,
+\quad \forall i\in\mathcal{I}. $$
+
+The final expected cost allocated to user $i$ is:
+$$ C^{final}_i=B_i-g_i. $$
+
+Therefore, $g_i\ge 0$ implies $C^{final}_i\le B_i$, i.e., every user has a nonnegative gain relative to standalone operation.
+
+A stronger fairness condition can be included as:
+$$ g_i\ge \varepsilon R_i,
+\quad \forall i\in\mathcal{I}, $$
+
+where $R_i$ is a positive reference value. A natural choice is $R_i=B_i$ when $B_i>0$ for all users. If some users have negative standalone net costs due to high PV exports, a safer normalization is the expected gross standalone import bill:
+$$ R_i=\sum_{\omega\in\Omega}\pi_{\omega}\sum_{t\in\mathcal{T}}\Delta t\lambda^{buy}_{t}p^{imp,stand}_{i,t,\omega}. $$
+
+The auxiliary variable $z$ may also be used to measure the minimum relative gain:
+$$ g_i\ge zR_i,
+\quad \forall i\in\mathcal{I}. $$
+
+Then, $z$ represents the minimum relative saving guaranteed among all community members.
+
+---
+
+## 13. Carbon-emission extension
+
+A carbon-emission term can be included without changing the basic structure of the model. The expected carbon emissions may be represented as:
+$$ E^{CO2}=\sum_{\omega\in\Omega}\pi_{\omega}
+\sum_{t\in\mathcal{T}}\Delta t
+\left(
+\gamma^{grid}_{t}p^{imp}_{t,\omega}
++\gamma^{H2}p^{EL}_{t,\omega}
+\right). $$
+
+If the hydrogen is produced only from local PV surplus, the term $\gamma^{H2}p^{EL}_{t,\omega}$ may be omitted or set to zero. If grid electricity can be used for hydrogen production, this term should be treated carefully to avoid double-counting emissions already represented through $p^{imp}_{t,\omega}$.
+
+### 13.1 Epsilon-constraint multi-objective formulation
+
+A more rigorous multi-objective alternative is to minimize cost while imposing progressively tighter emission limits:
+$$ \min C^{EC} $$
+
+subject to
+$$ E^{CO2}\le \epsilon^{CO2}_{k}. $$
+
+The emission limits may be generated as:
+$$ \epsilon^{CO2}_{k}=E^{CO2,min}+\frac{k}{K}\left(E^{CO2,cost}-E^{CO2,min}\right),
+\quad k=0,1,\ldots,K, $$
+
+where $E^{CO2,cost}$ is the emission level obtained from the cost-minimization model and $E^{CO2,min}$ is obtained by solving an emission-minimization model.
+
+---
+
+## 14. Final mathematical model
+
+$$ \min C^{EC} $$
+
+subject to
+\begin{align}
+&\text{standalone benchmark definitions,}\nonumber\\
+&\text{community power balance,}\nonumber\\
+&\text{PV limits and curtailment,}\nonumber\\
+&\text{grid import/export limits and PCC export cap,}\nonumber\\
+&\text{BESS operation constraints,}\nonumber\\
+&\text{hydrogen operation constraints,}\nonumber\\
+&\text{two-stage non-anticipativity constraints,}\nonumber\\
+&\text{community gain allocation constraints,}\nonumber\\
+&g_i\ge 0,\quad \forall i\in\mathcal{I},\\
+&g_i\ge \varepsilon R_i,\quad \forall i\in\mathcal{I},\\
+&E^{CO2}\le \epsilon^{CO2}_{k}. 
+\end{align}
 
 ## Project Structure
 
