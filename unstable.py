@@ -52,17 +52,69 @@ blackout = {
 blackout['prob_por_horario'] = {
     h: blackout['probabilidade_total'] / len(blackout['horarios']) # evento independente, distribuição uniforme de probabilidade
     for h in blackout['horarios']
-    }
+    } # blackout['prob_por_horario'] = {0: 0.00625, 3: 0.00625, 6: 0.00625, 9: 0.00625, 12: 0.00625, 15: 0.00625, 18: 0.00625, 21: 0.00625}
 
-# blackout['prob_por_horario'] = {0: 0.00625, 3: 0.00625, 6: 0.00625, 9: 0.00625, 12: 0.00625, 15: 0.00625, 18: 0.00625, 21: 0.00625}
 
 class SmartHomeStochastic:
     def __init__(self, scenarios, tariff_buy, blackout):
         self.scenarios  = scenarios
         self.tariff_buy = tariff_buy
         self.blackout   = blackout
+        self.B_standalone = self.compute_standalone_costs()
         self.results    = {}        # será preenchido em solve()
 
+    def compute_standalone_costs(self):
+        m_stand = pyo.ConcreteModel("Standalone")
+
+        # Conjuntos
+        m_stand.T = pyo.RangeSet(0, len(self.tariff_buy) - 1)
+        m_stand.S = pyo.Set(initialize=self.scenarios.keys())
+
+        # Parâmetros
+        m_stand.P_demand = pyo.Param(m_stand.S, m_stand.T, initialize=lambda m, s, t: self.scenarios[s]['P_demand'][t])
+        m_stand.P_pv_max = pyo.Param(m_stand.S, m_stand.T, initialize=lambda m, s, t: self.scenarios[s]['P_pv_used'][t])
+        m_stand.tariff   = pyo.Param(m_stand.T, initialize=lambda m, t: self.tariff_buy[t])
+        m_stand.prob     = pyo.Param(m_stand.S, initialize=lambda m, s: self.scenarios[s]['prob'])
+
+        # Variáveis (NÃO tem bateria, NÃO tem binárias)
+        m_stand.P_imp = pyo.Var(m_stand.S, m_stand.T, within=pyo.NonNegativeReals)
+        m_stand.P_exp = pyo.Var(m_stand.S, m_stand.T, within=pyo.NonNegativeReals)
+        m_stand.P_pv  = pyo.Var(m_stand.S, m_stand.T, within=pyo.NonNegativeReals)
+
+        # Restrições
+        def pv_limit_rule(m, s, t):
+            return m.P_pv[s, t] <= m.P_pv_max[s, t]
+        m_stand.pv_limit = pyo.Constraint(m_stand.S, m_stand.T, rule=pv_limit_rule)
+
+        def balance_rule(m, s, t):
+            return m.P_imp[s, t] + m.P_pv[s, t] == m.P_demand[s, t] + m.P_exp[s, t]
+        m_stand.balance = pyo.Constraint(m_stand.S, m_stand.T, rule=balance_rule)
+
+        # Objetivo: minimizar custo esperado (equivalente a rodar todos os cenários juntos)
+        def obj_rule(m):
+            return sum(m.prob[s] * (m.tariff[t] * m.P_imp[s, t] - 0.7 * m.tariff[t] * m.P_exp[s, t]) for s in m.S for t in m.T)
+        m_stand.obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
+
+        # Solve
+        solver = SolverFactory('gurobi')  # or 'glpk'
+        solver.solve(m_stand)
+
+        # Extract net electricity bill of user i when operating alone.
+        # NOTE: this is a DAILY expected cost (T = 24h, no ×365 annualization).
+        B_i = pyo.value(m_stand.obj)
+        print(f"✅ Custo Standalone Esperado (B_i) = R$ {B_i:.2f}")
+
+        ''' VISUALIZE TIME STAMPS AND BALANCE
+        for s in m_stand.S:
+            for t in m_stand.T:
+                imp = pyo.value(m_stand.P_imp[s,t])
+                exp = pyo.value(m_stand.P_exp[s,t])
+                pv  = pyo.value(m_stand.P_pv[s,t])
+                d   = self.scenarios[s]['P_demand'][t]
+                print(f"{s} t={t}: imp={imp:.2f} pv={pv:.2f} exp={exp:.2f} -> balanço: {imp+pv - d - exp:.2f}")
+        '''
+        return B_i
+        
     def build(self):
         m     = pyo.ConcreteModel('SmartHome_Stochastic') # m stands for model
         self.delta = delta = 1.0
@@ -190,14 +242,13 @@ class SmartHomeStochastic:
         self.CAPEX_BESS   = 2500 #* 4.96     # BRL/kWh
         CAPEX_PV     = 1200 #* 4.96   # BRL/kWh/dia
         
-        self.OPEX         = 365 * self.delta * sum(m.blackout_prob[b] * m.prob[s] * (m.tariff[t] * m.Pgrid_buy[s, t, b] - 0.7 * m.tariff[t] * m.Pgrid_sell[s, t, b]) for b in m.B for s in m.S for t in m.T)
+        self.OPEX         = self.delta * sum(m.blackout_prob[b] * m.prob[s] * (m.tariff[t] * m.Pgrid_buy[s, t, b] - 0.7 * m.tariff[t] * m.Pgrid_sell[s, t, b]) for b in m.B for s in m.S for t in m.T) # daily
         
-        # r. infl
-        self.r = 0.05
-        self.horizon = 25 # anos
+        self.r = 0.05 # r. inflation
+        self.horizon = 25 # years
         
         def objective_rule(m):
-            NPV = sum((self.OPEX ) / ((1 + self.r) ** year) for year in range(25))
+            NPV = sum((365 * self.OPEX ) / ((1 + self.r) ** year) for year in range(25))
             return (m.BESS_capacity * self.CAPEX_BESS + NPV + m.PV_Pmax  * CAPEX_PV) # anual
             
         self.objective = m.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)   
@@ -363,6 +414,7 @@ class SmartHomeStochastic:
 
         plt.tight_layout()
         plt.show()
+
 # ── Execução ───────────────────────────────────────────────────────────────────
 sh = SmartHomeStochastic(scenarios, tariff_buy, blackout)
 sh.build()
