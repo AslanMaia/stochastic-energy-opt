@@ -15,9 +15,12 @@
 
 Solar generation peaks at noon. Electricity prices peak in the evening. Demand is unpredictable. Grid outages happen.
 
-This repository implements a **two-stage stochastic MILP** that decides — before the day unfolds — the optimal sizing of a residential solar PV system and battery storage (BESS), minimizing the net present value (NPV) of total investment and operational costs over a 25-year horizon across all plausible scenarios of generation, demand, and grid availability.
+This repository implements a **two-stage stochastic MILP** for a residential energy system with solar PV and battery storage (BESS):
 
-Rather than optimizing for a single forecast, the model hedges: it commits to sizing decisions robust enough to perform well whether tomorrow is sunny, cloudy, high-demand, or affected by a blackout.
+- **First stage (here-and-now):** sizing of the PV system and the BESS, decided once and shared by all scenarios.
+- **Second stage (wait-and-see):** hourly operation (grid exchange, BESS charge/discharge) decided separately for each scenario of generation, demand, and grid availability.
+
+The objective minimizes the net present value (NPV) of investment plus expected operational costs over a 25-year horizon. Rather than optimizing for a single forecast, the model selects a sizing that performs well across sunny, cloudy, high-demand, and blackout scenarios.
 
 ---
 
@@ -25,8 +28,12 @@ Rather than optimizing for a single forecast, the model hedges: it commits to si
 
 ```
 stochastic-energy-opt/
-├── v2.1.py            # Main model — data, SmartHomeStochastic class, entry point
-├── requirements.txt   # Python dependencies
+├── math_formulation.ipynb   # Formal mathematical formulation of the model
+├── v2.1.py                  # Stable version — data, SmartHomeStochastic class, entry point
+├── dev/
+│   ├── v2.2_unstable.py     # Development version (under debugging)
+│   └── v2.2_output.png      # Latest output of v2.2
+├── requirements.txt         # Python dependencies
 ├── LICENSE
 └── README.md
 ```
@@ -36,6 +43,17 @@ stochastic-energy-opt/
 - **Data** — hourly demand, PV generation profiles, time-of-use tariff, and scenario/blackout parameters defined as plain Python lists and dicts.
 - **`SmartHomeStochastic` class** — encapsulates `build()` (constructs the Pyomo MILP), `solve()` (calls Gurobi and collects results into DataFrames), and `plot()` (generates the figures below).
 - **Entry point** — instantiates the class and runs `build → solve → plot` in sequence.
+
+`dev/v2.2_unstable.py` extends v2.1 with a standalone baseline (cost without PV/BESS, for comparison) and PV curtailment. It is still being debugged and may not run correctly.
+
+---
+
+## Roadmap
+
+- [x] Mathematical formulation (`math_formulation.ipynb`)
+- [x] Stable two-stage model with PV + BESS (v2.1)
+- [ ] Standalone baseline and PV curtailment (v2.2, in progress)
+- [ ] Hydrogen storage constraints (electrolyzer, tank, fuel cell)
 
 ---
 
