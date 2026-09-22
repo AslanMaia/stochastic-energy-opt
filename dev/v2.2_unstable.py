@@ -116,21 +116,21 @@ class SmartHomeStochastic:
         m.tariff   = pyo.Param(m.T,
                                initialize=lambda m, t: self.tariff_buy[t])
 
-        # PARÂMETROS ─────────────────────────────────────────────────────────────────────
-        eff       = 0.9
+        # PARAMETERS ─────────────────────────────────────────────────────────────────────
+        eff_bess  = 0.9
         beta      = 0.01 # self-discharge rate
         Pmax_grid = 1.3 * max(P_demand_data) # kW, limite de compra/venda da rede é dado pela fiação contrada da minha casa
-        c_curlt  = 1 # custo de curta duração (curtailment) [BRL/kWh]
+        c_curlt  = 1 # curtailment [BRL/kWh]
         
-        ### VARIÁVEIS ─────────────────────────────────────────────────────────────────────
+        ### VARIABLES ─────────────────────────────────────────────────────────────────────
 
-        # Variáveis de decisão (1ª etapa)
+        # Decision variables (1ª etapa)
         m.E_bess_init   = pyo.Var(within=pyo.NonNegativeReals)
         m.BESS_capacity = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 200))
         m.BESS_Pmax     = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 20))
-        m.PV_Pmax       = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 20)) # kWp    
+        m.PV_Pmax       = pyo.Var(within=pyo.NonNegativeReals, bounds=(0, 20)) # kWp
 
-        # Variáveis operacionais (2ª etapa)
+        # Operational variables (2ª etapa)
         m.Pgrid_buy       = pyo.Var(m.S, m.T, within=pyo.NonNegativeReals, bounds=(0, Pmax_grid))
         m.Pgrid_sell      = pyo.Var(m.S, m.T, within=pyo.NonNegativeReals, bounds=(0, Pmax_grid))
         m.Pgrid           = pyo.Var(m.S, m.T, within=pyo.Reals,            bounds=(-Pmax_grid, Pmax_grid))
@@ -143,7 +143,7 @@ class SmartHomeStochastic:
 
         ### RESTRIÇÕES ──────────────────────────────────────────────────────────────────────
 
-        # 1. Limites físicos e operacionais
+        # 1. Limits
         def energy_capacity_limit(m, s, t):
             return m.E_bess[s, t] <= m.BESS_capacity
         m.energy_cap = pyo.Constraint(m.S, m.T, rule=energy_capacity_limit)
@@ -166,7 +166,7 @@ class SmartHomeStochastic:
             return m.E_bess_init <= m.BESS_capacity
         m.E_bess_init_cap = pyo.Constraint(rule=init_capacity_limit)
 
-        # 2. Evita carga e descarga simultâneas
+        # 2. Avoiding simultaneous charge and discharge
         M = 200 * 0.5 # BESS_capacity_max × C_rate
   
         def no_simultaneous_charge(m, s, t):
@@ -178,7 +178,7 @@ class SmartHomeStochastic:
         m.no_simul_discharge = pyo.Constraint(m.S, m.T, rule=no_simultaneous_discharge)
 
 
-        # 3. Balanços
+        # 3. Balaces
         def power_balance_rule(m, s, t):
             return (+ m.Pgrid_buy[s, t]
                     + m.P_pv[s, t] * m.PV_Pmax
@@ -195,8 +195,8 @@ class SmartHomeStochastic:
         m.grid_balance = pyo.Constraint(m.S, m.T, rule=grid_balance_rule)
 
         def bess_energy_rule(m, s, t):
-            charge    = eff * delta * m.Pbess_charge[s, t]
-            discharge = delta * m.Pbess_discharge[s, t] / eff
+            charge    = eff_bess * delta * m.Pbess_charge[s, t]
+            discharge = delta * m.Pbess_discharge[s, t] / eff_bess
             loss      = beta * delta * m.E_bess[s, t]
 
             if t == 0:
@@ -206,12 +206,12 @@ class SmartHomeStochastic:
             return m.E_bess[s, t] == E_prev + charge - discharge - loss
         m.bess_energy = pyo.Constraint(m.S, m.T, rule=bess_energy_rule)
 
-        # Objetivo ──────────────────────────────────────────────────────────────────────
+        ### OBJECTIVE ──────────────────────────────────────────────────────────────────────
                 
         self.CAPEX_BESS   = 2500 #* 4.96     # BRL/kWh
         CAPEX_PV     = 1200 #* 4.96   # BRL/kWh/dia
         
-        # C_EC: custo operacional esperado DIÁRIO da comunidade coordenada (sem CAPEX) — mesma grandeza e mesma escala temporal do B_standalone (Eq. 7/8 do PDF).
+        # C_EC: custo operacional esperado DIÁRIO da comunidade coordenada (sem CAPEX) — mesma grandeza e mesma escala temporal do B_standalone
         self.C_EC = self.delta * sum(m.prob[s] * (m.tariff[t] * m.Pgrid_buy[s, t] - 0.1 * m.tariff[t] * m.Pgrid_sell[s, t] + c_curlt * m.Pcurlt[s, t]) for s in m.S for t in m.T)
         
         # r. infl
@@ -387,7 +387,8 @@ class SmartHomeStochastic:
 
         plt.tight_layout()
         plt.show()
-# ── Execução ───────────────────────────────────────────────────────────────────
+
+# EXECUTION
 sh = SmartHomeStochastic(scenarios, tariff_buy)
 sh.build()
 sh.solve()
