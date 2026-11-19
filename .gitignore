@@ -22,7 +22,7 @@ venv.bak/
 *.swo
 *~
 
-# Data files (depende do seu projeto)
+# Data files
 data/raw/*.csv
 data/processed/*.csv
 *.xlsx

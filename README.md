@@ -1,4 +1,4 @@
-# Stochastic Energy Management for Residential Energy Communities
+# Two-Stage Stochastic Sizing and Operation of a Residential PV–Battery System
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
 ![Pyomo](https://img.shields.io/badge/Optimization-Pyomo-orange)
@@ -7,7 +7,7 @@
 ![UNICAMP](https://img.shields.io/badge/Institution-UNICAMP-blue)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
-> *Undergraduate research project (Iniciação Científica) — CPTEn / FEEC / UNICAMP*
+> First stage of the undergraduate research project *Stochastic Modeling and Optimization of the Operation of Hybrid Energy Communities with Storage* (Iniciação Científica, FAPESP) — CPTEn / FEEC / UNICAMP. Advisor: Prof. Dr. Marcos Julio Rider Flores.
 
 ---
 
@@ -68,7 +68,7 @@ cd stochastic-energy-opt
 pip install -r requirements.txt
 ```
 
-A valid **Gurobi license** is required. Academic licenses are available free of charge at [gurobi.com](https://www.gurobi.com/academia/academic-program-and-licenses/).
+A valid **Gurobi license** is required: `gurobipy` installs the solver, but this model exceeds the size limit of the license bundled with the pip package. Academic licenses are available free of charge at [gurobi.com](https://www.gurobi.com/academia/academic-program-and-licenses/).
 
 ---
 
@@ -78,7 +78,7 @@ A valid **Gurobi license** is required. Academic licenses are available free of 
 python v2.1.py
 ```
 
-The script will print the solver status, optimal objective value, and per-scenario dispatch tables to the terminal, then open two matplotlib figures.
+The script will print the solver status, optimal objective value, and per-scenario dispatch tables to the terminal, then open two matplotlib figures. Variable names, console output and plot labels are in Portuguese.
 
 ---
 
